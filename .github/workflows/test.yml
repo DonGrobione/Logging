@@ -1,0 +1,60 @@
+name: Test
+
+# Runs the Pester tests on Windows PowerShell 5.1, the version the module
+# targets. Also called by release.yml so that no release is built from a
+# commit that fails on 5.1.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell   # Windows PowerShell 5.1, not pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PowerShell version
+        run: |
+          $PSVersionTable | Format-Table -AutoSize | Out-String | Write-Host
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+              throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)."
+          }
+
+      - name: Check scripts parse on 5.1 and module files are ASCII
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem -Recurse -Include *.ps1, *.psm1, *.psd1 -File) {
+              $tokens = $null; $errors = $null
+              $null = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+              foreach ($e in $errors) {
+                  Write-Host "::error file=$($file.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                  $failed = $true
+              }
+          }
+          # 5.1 reads BOM-less files as ANSI, so module files must stay ASCII.
+          foreach ($file in Get-ChildItem -Include *.psm1, *.psd1 -File -Path .\*) {
+              if (@([IO.File]::ReadAllBytes($file.FullName) | Where-Object { $_ -gt 127 }).Count -gt 0) {
+                  Write-Host "::error file=$($file.Name)::Contains non-ASCII characters."
+                  $failed = $true
+              }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Validate manifest
+        run: Test-ModuleManifest -Path .\DonGrobione.Logging.psd1 -ErrorAction Stop | Format-List Name, Version, ExportedFunctions
+
+      - name: Run Pester 3.4 tests
+        run: |
+          # The tests use Pester 3.4 syntax (bundled with Windows); runner images
+          # may only ship newer Pester versions.
+          if (-not (Get-Module -ListAvailable Pester | Where-Object Version -eq '3.4.0')) {
+              Install-Module -Name Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+          Import-Module Pester -RequiredVersion 3.4.0
+          $result = Invoke-Pester -Script .\Tests -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }

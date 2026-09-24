@@ -175,6 +175,8 @@ The tests use Pester 3.4, which comes with Windows PowerShell 5.1:
 powershell -NoProfile -Command "Invoke-Pester -Script .\Tests"
 ```
 
+GitHub Actions runs the same tests on Windows PowerShell 5.1 for every push and pull request. A release is only published if they pass.
+
 ## License
 
 GNU Affero General Public License v3.0. See [LICENSE](LICENSE).

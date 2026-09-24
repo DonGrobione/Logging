@@ -26,7 +26,9 @@ powershell -NoProfile -Command "Invoke-Pester -Script .\Tests -TestName 'Retenti
 Test-ModuleManifest .\DonGrobione.Logging.psd1
 ```
 
-Each feature has its own Describe block (Formatting, Timestamp, Default configuration, Retention, Safety, Retry) so it can be run alone with `-TestName`.
+Each feature has its own Describe block (Formatting, Timestamp, Default configuration, Retention, Safety, Retry, Update) so it can be run alone with `-TestName`.
+
+**CI:** `.github/workflows/test.yml` runs on every push and pull request, on `windows-latest` with `shell: powershell` (5.1). It checks the version, parses every script with the 5.1 parser, checks that the `.psm1`/`.psd1` are ASCII-only, validates the manifest, and runs the tests with Pester 3.4.0 (installing it if the runner image lacks it). `release.yml` calls it as a reusable workflow and only releases if it passes.
 
 ## Architecture and constraints
 
