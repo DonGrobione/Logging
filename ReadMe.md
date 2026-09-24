@@ -19,6 +19,22 @@ Requires Windows PowerShell 5.1 or later. No other modules are needed.
 
 ## Installation
 
+Run this in PowerShell. It downloads the latest release and installs it into your module folder (`Documents\WindowsPowerShell\Modules`, or `Documents\PowerShell\Modules` in PowerShell 7):
+
+```powershell
+irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1 | iex
+```
+
+To pass options, run the script as a scriptblock instead. `-Scope AllUsers` installs to Program Files (needs an administrator session), and `-Force` reinstalls even if the version is current:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1))) -Scope AllUsers
+```
+
+The script works like `Update-DonGrobioneLogging`: if the same or a newer version is already installed, it changes nothing. It overwrites the module files but never deletes the folder, and it leaves a git clone alone unless you add `-Force`.
+
+**Manual installation:**
+
 1. Download `DonGrobione.Logging-<version>.zip` from the [latest release](https://github.com/DonGrobione/Logging/releases/latest).
 2. Extract it into your module folder. The zip already contains the `DonGrobione.Logging` folder:
 

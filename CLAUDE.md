@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `DonGrobione.Logging.psm1`: the whole module. Exports `Start-Log`, `Write-Log`, `Stop-Log` and `Update-DonGrobioneLogging`. All other functions are private.
 - `DonGrobione.Logging.psd1`: the manifest. When you add a public function, update `FunctionsToExport` here and `Export-ModuleMember` in the `.psm1`.
+- `Install.ps1`: a standalone installer meant for `irm <raw GitHub URL> | iex`. It duplicates the download, check and install logic of `Update-DonGrobioneLogging` because the module isn't available yet when it runs. Keep the two in sync. The body runs inside `& { param(...) ... }` so that under `iex` no variables (including `$ErrorActionPreference`) leak into the caller's session. Never use `exit` in it: under `iex` that closes the user's shell. It is not part of the release zip.
 - `Examples\Invoke-OrchestratorExample.ps1`: the recommended caller pattern.
 - `Tests\DonGrobione.Logging.Tests.ps1`: the Pester tests.
 
