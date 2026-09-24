@@ -1,0 +1,57 @@
+name: Release
+
+# Creates a GitHub release with a zip of the module whenever ModuleVersion in
+# the manifest changes. "Changed" means: no tag v<ModuleVersion> exists yet.
+on:
+  push:
+    branches: [main]
+    paths:
+      - DonGrobione.Logging.psd1
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to see existing tags
+
+      - name: Read module version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Test-ModuleManifest -Path ./DonGrobione.Logging.psd1 -ErrorAction Stop
+          $version  = $manifest.Version.ToString()
+          $tag      = "v$version"
+          $exists   = [bool](git tag --list $tag)
+          Write-Host "ModuleVersion: $version, tag $tag exists: $exists"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag"         >> $env:GITHUB_OUTPUT
+          "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Build zip
+        if: steps.version.outputs.exists == 'false'
+        id: zip
+        run: |
+          # Top-level folder named like the module, so the zip can be extracted
+          # straight into a PowerShell module path.
+          mkdir -p staging/DonGrobione.Logging
+          cp DonGrobione.Logging.psd1 DonGrobione.Logging.psm1 LICENSE ReadMe.md staging/DonGrobione.Logging/
+          zip_name="DonGrobione.Logging-${{ steps.version.outputs.version }}.zip"
+          (cd staging && zip -r "../$zip_name" DonGrobione.Logging)
+          unzip -l "$zip_name"
+          echo "name=$zip_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.zip.outputs.name }}" \
+            --target "${{ github.sha }}" \
+            --title "DonGrobione.Logging ${{ steps.version.outputs.version }}" \
+            --generate-notes
