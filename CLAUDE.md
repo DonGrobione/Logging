@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `DonGrobione.Logging` is a PowerShell logging module used by all of the user's scripts. **`Docs/Specification.md` is the original requirements spec.** Check it before you change behavior. `ReadMe.md` is the user-facing documentation: keep its parameter table and examples in sync when the public API changes.
 
-- `DonGrobione.Logging.psm1`: the whole module. Exports `Start-Log`, `Write-Log` and `Stop-Log`. All other functions are private.
+- `DonGrobione.Logging.psm1`: the whole module. Exports `Start-Log`, `Write-Log`, `Stop-Log` and `Update-DonGrobioneLogging`. All other functions are private.
 - `DonGrobione.Logging.psd1`: the manifest. When you add a public function, update `FunctionsToExport` here and `Export-ModuleMember` in the `.psm1`.
 - `Examples\Invoke-OrchestratorExample.ps1`: the recommended caller pattern.
 - `Tests\DonGrobione.Logging.Tests.ps1`: the Pester tests.
@@ -37,6 +37,7 @@ Each feature has its own Describe block (Formatting, Timestamp, Default configur
   - Writes and directory creation go through `Invoke-WithRetry`. `RetryCount` is the total number of attempts, and the delay grows linearly (`RetryDelayMs` × attempt).
   - If all attempts fail, `Write-LogFallback` writes the full entry with `Write-Warning`.
 - **Retention:** it only matches `<COMPUTERNAME>_*.log`. The underscore is deliberate, so that HOST1 never deletes HOST10's files. It keeps `RetentionCount - 1` older files plus the current session's file. Files it can't delete are skipped.
-- **The module must never throw.** Public functions wrap their bodies in try/catch. `Write-LogFallback` swallows its own failure, which matters if the caller sets `$WarningPreference = 'Stop'`. `FATAL` is only a severity label: stopping the script is the caller's job (see the example).
+- **The logging functions must never throw.** `Start-Log`, `Write-Log` and `Stop-Log` wrap their bodies in try/catch. `Write-LogFallback` swallows its own failure, which matters if the caller sets `$WarningPreference = 'Stop'`. `FATAL` is only a severity label: stopping the script is the caller's job (see the example).
+- **Updater:** `Update-DonGrobioneLogging` is the exception to the no-throw rule: it reports problems with `Write-Error` and returns a result object. It reads `releases/latest` from the GitHub API, compares the release tag with the *installed* manifest (from `Get-ModuleInstallPath`, which tests mock), and checks the zip's manifest version before copying over the files. It never deletes the install folder, and it skips a folder that contains `.git` unless `-Force` is given. The release zip layout it expects is the one `.github/workflows/release.yml` builds. Avoid `Select-Object -First` in module code: in 5.1 it leaks a `StopUpstreamCommandsException` into the caller's `-ErrorVariable`.
 - **Environment:** Windows PowerShell 5.1, no external modules, approved verbs, and comment-based help on every public function. Keep the `.psm1`/`.psd1` ASCII-only: 5.1 reads BOM-less files as ANSI.
 - **Localized test machine:** on the user's German Windows, stack traces say `bei` instead of `at`. Test assertions must not depend on localized text.

@@ -19,23 +19,48 @@ Requires Windows PowerShell 5.1 or later. No other modules are needed.
 
 ## Installation
 
-Copy the `DonGrobione.Logging` folder into one of your module paths, for example:
+1. Download `DonGrobione.Logging-<version>.zip` from the [latest release](https://github.com/DonGrobione/Logging/releases/latest).
+2. Extract it into your module folder. The zip already contains the `DonGrobione.Logging` folder:
 
-```
-Documents\WindowsPowerShell\Modules\DonGrobione.Logging\
+```powershell
+$modules = "$([Environment]::GetFolderPath('MyDocuments'))\WindowsPowerShell\Modules"
+Expand-Archive -Path "$HOME\Downloads\DonGrobione.Logging-*.zip" -DestinationPath $modules -Force
+Get-ChildItem "$modules\DonGrobione.Logging" | Unblock-File   # remove the "downloaded from the internet" mark
 ```
 
-The folder must be named `DonGrobione.Logging`, the same as the module. A plain clone creates a folder called `Logging`, so give the name explicitly:
+After that, `Import-Module DonGrobione.Logging` works from any script. You can also import the module directly by path, without installing it:
+
+```powershell
+Import-Module 'C:\Path\To\DonGrobione.Logging\DonGrobione.Logging.psd1'
+```
+
+**From git instead:** the folder must be named `DonGrobione.Logging`, the same as the module. A plain clone creates a folder called `Logging`, so give the name explicitly. Update a clone with `git pull`, not with `Update-DonGrobioneLogging`.
 
 ```powershell
 git clone https://github.com/DonGrobione/Logging.git "$([Environment]::GetFolderPath('MyDocuments'))\WindowsPowerShell\Modules\DonGrobione.Logging"
 ```
 
-After that, `Import-Module DonGrobione.Logging` works from any script. You can also import it directly by path:
+## Updating
+
+`Update-DonGrobioneLogging` checks the latest GitHub release and compares its version with the version installed in the default module folder. If the release is newer, it downloads the zip and overwrites the installed module files.
 
 ```powershell
-Import-Module 'C:\Path\To\DonGrobione.Logging\DonGrobione.Logging.psd1'
+Update-DonGrobioneLogging            # update if a newer release exists
+Update-DonGrobioneLogging -WhatIf    # only show whether an update is available
+Update-DonGrobioneLogging -Force     # reinstall even if the version is current
 ```
+
+```
+InstalledVersion LatestVersion Path                                                         Updated
+---------------- ------------- ----                                                         -------
+1.0.0            1.1.0         C:\Users\me\Documents\WindowsPowerShell\Modules\DonGrobione.Logging True
+```
+
+- **Where it installs:** `Documents\WindowsPowerShell\Modules\DonGrobione.Logging` (or `Documents\PowerShell\Modules` in PowerShell 7). Use `-Scope AllUsers` for `Program Files\...\Modules`; that needs an administrator session.
+- **First install:** if the module isn't installed there yet, it installs it. So you can also import the module by path once and run `Update-DonGrobioneLogging` to install it.
+- **Safety:** the downloaded package is checked before anything is overwritten. A folder that is a git clone is left alone unless you add `-Force`.
+- **After updating:** your current PowerShell session still uses the old version. Open a new session, or run `Import-Module DonGrobione.Logging -Force`.
+- **Errors:** unlike the logging functions, the updater reports problems (for example, no internet connection) as normal PowerShell errors.
 
 ## Initializing logging in a script
 

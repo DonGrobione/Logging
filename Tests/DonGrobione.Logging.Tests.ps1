@@ -6,6 +6,8 @@ $moduleManifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'DonGrobione.Logg
 Get-Module -Name DonGrobione.Logging | Remove-Module -Force
 Import-Module $moduleManifest -Force -ErrorAction Stop
 
+# Each Describe mocks Get-LogBasePath into its TestDrive. Pester 3.4 requires a
+# literal scriptblock for mock bodies ($TestDrive is a global variable there).
 
 function New-TestDirectoryName {
     'T' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -253,5 +255,88 @@ Describe 'Retry' {
         $warnings[0].Message | Should Match '\[FATAL\] lost line 1'
         $warnings[0].Message | Should Match '    -> lost line 2'
         (Get-Item -LiteralPath $logFile).Length | Should Be 0
+    }
+}
+
+Describe 'Update' {
+    # Fake release v9.9.9: the API call returns a release object, the download
+    # copies a locally built zip, and the install folder lives in TestDrive.
+    $installPath = [System.IO.Path]::Combine($TestDrive, 'Modules', 'DonGrobione.Logging')
+    Mock -ModuleName DonGrobione.Logging Get-ModuleInstallPath { [System.IO.Path]::Combine($TestDrive, 'Modules', 'DonGrobione.Logging') }
+    Mock -ModuleName DonGrobione.Logging Invoke-RestMethod {
+        [pscustomobject]@{
+            tag_name = 'v9.9.9'
+            assets   = @([pscustomobject]@{
+                name                 = 'DonGrobione.Logging-9.9.9.zip'
+                browser_download_url = 'https://example.invalid/DonGrobione.Logging-9.9.9.zip'
+            })
+        }
+    }
+    Mock -ModuleName DonGrobione.Logging Invoke-WebRequest {
+        Copy-Item -LiteralPath ([System.IO.Path]::Combine($TestDrive, 'package.zip')) -Destination $OutFile
+    }
+
+    $packageDir = [System.IO.Path]::Combine($TestDrive, 'package', 'DonGrobione.Logging')
+    $null = New-Item -ItemType Directory -Path $packageDir
+    Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psd1') -Value "@{ ModuleVersion = '9.9.9' }"
+    Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psm1') -Value '# new version'
+    Compress-Archive -Path $packageDir -DestinationPath ([System.IO.Path]::Combine($TestDrive, 'package.zip'))
+
+    function Set-InstalledVersion {
+        param([string]$Version)
+        $null = New-Item -ItemType Directory -Path $installPath -Force
+        Set-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psd1') -Value "@{ ModuleVersion = '$Version' }"
+        Set-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') -Value '# old version'
+    }
+
+    function Get-InstalledVersion {
+        [version](Import-PowerShellDataFile -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psd1')).ModuleVersion
+    }
+
+    BeforeEach {
+        if (Test-Path -LiteralPath $installPath) {
+            Remove-Item -LiteralPath $installPath -Recurse -Force
+        }
+    }
+
+    It 'installs the latest release when the module is not installed' {
+        $result = Update-DonGrobioneLogging
+        $result.Updated | Should Be $true
+        $result.InstalledVersion | Should BeNullOrEmpty
+        Get-InstalledVersion | Should Be ([version]'9.9.9')
+    }
+
+    It 'overwrites an older installed version' {
+        Set-InstalledVersion '1.0.0'
+        $result = Update-DonGrobioneLogging
+        $result.Updated | Should Be $true
+        $result.InstalledVersion | Should Be ([version]'1.0.0')
+        Get-InstalledVersion | Should Be ([version]'9.9.9')
+        Get-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') | Should Be '# new version'
+    }
+
+    It 'does not download when the installed version is up to date' {
+        Set-InstalledVersion '9.9.9'
+        $result = Update-DonGrobioneLogging
+        $result.Updated | Should Be $false
+        Assert-MockCalled -ModuleName DonGrobione.Logging Invoke-WebRequest -Times 0 -Exactly -Scope It
+        Get-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') | Should Be '# old version'
+    }
+
+    It 'does not change anything with -WhatIf' {
+        Set-InstalledVersion '1.0.0'
+        $result = Update-DonGrobioneLogging -WhatIf
+        $result.Updated | Should Be $false
+        Get-InstalledVersion | Should Be ([version]'1.0.0')
+    }
+
+    It 'refuses to overwrite a git clone without -Force' {
+        Set-InstalledVersion '1.0.0'
+        $null = New-Item -ItemType Directory -Path (Join-Path $installPath '.git')
+        $result = Update-DonGrobioneLogging -ErrorAction SilentlyContinue -ErrorVariable updateErrors
+        $result.Updated | Should Be $false
+        $updateErrors.Count | Should Be 1
+        "$($updateErrors[0])" | Should Match 'git pull'
+        Get-InstalledVersion | Should Be ([version]'1.0.0')
     }
 }

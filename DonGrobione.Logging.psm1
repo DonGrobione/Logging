@@ -24,6 +24,9 @@ $script:TimestampFormat    = 'yyyy-MM-dd HH:mm:ss'
 # BOM lets Windows PowerShell 5.1 (Get-Content) read non-ASCII text correctly.
 $script:LogEncoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $true
 
+$script:ModuleName    = 'DonGrobione.Logging'
+$script:ReleaseApiUrl = 'https://api.github.com/repos/DonGrobione/Logging/releases/latest'
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -215,6 +218,16 @@ function Format-LogEntry {
     }
 
     ($lines -join [Environment]::NewLine) + [Environment]::NewLine
+}
+
+function Get-ModuleInstallPath {
+    # Default module folder of the running edition. Separate function so tests
+    # can mock the install location.
+    param([string]$Scope)
+
+    $editionFolder = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'WindowsPowerShell' }
+    $root = if ($Scope -eq 'AllUsers') { $env:ProgramFiles } else { [Environment]::GetFolderPath('MyDocuments') }
+    [System.IO.Path]::Combine($root, $editionFolder, 'Modules', $script:ModuleName)
 }
 
 # ---------------------------------------------------------------------------
@@ -423,4 +436,158 @@ function Stop-Log {
     $script:LogConfig = $null
 }
 
-Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log
+function Update-DonGrobioneLogging {
+    <#
+    .SYNOPSIS
+        Installs the latest release of DonGrobione.Logging from GitHub.
+
+    .DESCRIPTION
+        Reads the latest release of https://github.com/DonGrobione/Logging,
+        compares its version with the version installed in the default module
+        folder and, if the release is newer, downloads the release zip and
+        copies the module files over the installed ones.
+
+        Default module folders:
+          CurrentUser: <Documents>\WindowsPowerShell\Modules\DonGrobione.Logging
+          AllUsers:    <ProgramFiles>\WindowsPowerShell\Modules\DonGrobione.Logging
+        (PowerShell 7 uses 'PowerShell' instead of 'WindowsPowerShell'.)
+
+        The downloaded package is checked first: it must contain the module
+        manifest with the release's version. Files are overwritten, the folder
+        itself is not deleted. A folder that is a git clone is not touched
+        unless -Force is given; update it with 'git pull' instead.
+
+        The running session keeps the old version. Start a new session or run
+        'Import-Module DonGrobione.Logging -Force' to load the update.
+
+        Unlike the logging functions, errors are reported with Write-Error.
+
+    .PARAMETER Scope
+        CurrentUser (default) or AllUsers. AllUsers requires an elevated session.
+
+    .PARAMETER Force
+        Reinstall even if the installed version is up to date, and overwrite
+        the files of a git clone.
+
+    .OUTPUTS
+        An object with InstalledVersion (before the update), LatestVersion,
+        Path and Updated.
+
+    .EXAMPLE
+        Update-DonGrobioneLogging
+
+        Installs the latest release if it is newer than the installed version.
+
+    .EXAMPLE
+        Update-DonGrobioneLogging -WhatIf
+
+        Shows whether an update is available without installing it.
+
+    .EXAMPLE
+        Update-DonGrobioneLogging -Scope AllUsers
+
+        Updates the copy for all users (run as administrator).
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [ValidateSet('CurrentUser', 'AllUsers')]
+        [string]$Scope = 'CurrentUser',
+
+        [switch]$Force
+    )
+
+    $installPath      = Get-ModuleInstallPath -Scope $Scope
+    $installedVersion = $null
+    $installedManifest = Join-Path $installPath "$script:ModuleName.psd1"
+    if (Test-Path -LiteralPath $installedManifest) {
+        try {
+            $installedVersion = [version](Import-PowerShellDataFile -LiteralPath $installedManifest).ModuleVersion
+        }
+        catch {
+            Write-Warning "Could not read the installed version from '$installedManifest': $($_.Exception.Message)"
+        }
+    }
+
+    $headers = @{ 'User-Agent' = $script:ModuleName; 'Accept' = 'application/vnd.github+json' }
+    try {
+        # Windows PowerShell 5.1 does not enable TLS 1.2 by default; GitHub requires it.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $release = Invoke-RestMethod -Uri $script:ReleaseApiUrl -Headers $headers -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        Write-Error "Could not query the latest release from '$script:ReleaseApiUrl': $($_.Exception.Message)"
+        return
+    }
+
+    $latestVersion = $null
+    if (-not [version]::TryParse(([string]$release.tag_name).TrimStart('v', 'V'), [ref]$latestVersion)) {
+        Write-Error "The latest release tag '$($release.tag_name)' is not a version number."
+        return
+    }
+
+    # No Select-Object -First here: in 5.1 it leaks StopUpstreamCommandsException into -ErrorVariable.
+    $assets = @($release.assets | Where-Object { $_.name -like "$script:ModuleName-*.zip" })
+    if ($assets.Count -eq 0) {
+        Write-Error "Release '$($release.tag_name)' has no '$script:ModuleName-*.zip' asset."
+        return
+    }
+    $asset = $assets[0]
+
+    $result = [pscustomobject]@{
+        InstalledVersion = $installedVersion
+        LatestVersion    = $latestVersion
+        Path             = $installPath
+        Updated          = $false
+    }
+
+    if ($null -ne $installedVersion -and $installedVersion -ge $latestVersion -and -not $Force) {
+        Write-Verbose -Message "Version $installedVersion in '$installPath' is up to date."
+        return $result
+    }
+
+    if ((Test-Path -LiteralPath (Join-Path $installPath '.git')) -and -not $Force) {
+        Write-Error "'$installPath' is a git clone. Update it with 'git pull', or use -Force to overwrite its files."
+        return $result
+    }
+
+    $action = if ($null -eq $installedVersion) { "Install version $latestVersion" } else { "Update from version $installedVersion to $latestVersion" }
+    if (-not $PSCmdlet.ShouldProcess($installPath, $action)) {
+        return $result
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('{0}-{1}' -f $script:ModuleName, [guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $tempRoot -ErrorAction Stop
+        $zipPath = Join-Path $tempRoot $asset.name
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ 'User-Agent' = $script:ModuleName } -UseBasicParsing -ErrorAction Stop
+
+        $extractPath = Join-Path $tempRoot 'extracted'
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -ErrorAction Stop
+
+        # Validate the package before touching the installed module.
+        $sourcePath     = Join-Path $extractPath $script:ModuleName
+        $sourceManifest = Join-Path $sourcePath "$script:ModuleName.psd1"
+        if (-not (Test-Path -LiteralPath $sourceManifest)) {
+            throw "The package does not contain '$script:ModuleName\$script:ModuleName.psd1'."
+        }
+        $packageVersion = [version](Import-PowerShellDataFile -LiteralPath $sourceManifest).ModuleVersion
+        if ($packageVersion -ne $latestVersion) {
+            throw "The package contains version $packageVersion, expected $latestVersion."
+        }
+
+        $null = New-Item -ItemType Directory -Path $installPath -Force -ErrorAction Stop
+        Copy-Item -Path (Join-Path $sourcePath '*') -Destination $installPath -Recurse -Force -ErrorAction Stop
+        $result.Updated = $true
+        Write-Verbose -Message "Installed version $latestVersion to '$installPath'. Start a new session to load it."
+    }
+    catch {
+        Write-Error "Update to version $latestVersion failed: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $result
+}
+
+Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log, Update-DonGrobioneLogging

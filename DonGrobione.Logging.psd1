@@ -7,7 +7,7 @@
     Description       = 'Central logging for PowerShell scripts: one line per entry, retry on locked files (cloud sync), per-host retention. Never throws.'
     PowerShellVersion = '5.1'
 
-    FunctionsToExport = @('Start-Log', 'Write-Log', 'Stop-Log')
+    FunctionsToExport = @('Start-Log', 'Write-Log', 'Stop-Log', 'Update-DonGrobioneLogging')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
