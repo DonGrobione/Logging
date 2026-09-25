@@ -16,7 +16,7 @@ MODULE FUNCTIONS AND BEHAVIOR:
      -MinimumLevel, -RetryCount, -RetryDelayMs
    - Stores configuration in module session state (Script scope)
    - -LogDirectory: relative subfolder under base path; defaults to "Default"
-   - -LogFileName: defaults to "<HOSTNAME>_yyyy-MM-dd_HHmmss.log"
+   - -LogFileName: defaults to "<HOSTNAME>_yyyy-MM-dd_HH-mm-ss.log"
    - -RetentionCount: default 5 (files per hostname in the project folder)
    - -MinimumLevel: default 'INFO'; entries below threshold are not written
    - -RetryCount: default 3 (write attempts on failure)

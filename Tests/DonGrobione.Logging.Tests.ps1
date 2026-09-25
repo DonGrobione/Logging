@@ -98,13 +98,13 @@ Describe 'Default configuration' {
     $logRoot = Join-Path $TestDrive 'Logs'
     Mock -ModuleName DonGrobione.Logging Get-LogBasePath { [System.IO.Path]::Combine($TestDrive, 'Logs') }
 
-    It 'falls back to <base>\Default\<HOSTNAME>_yyyy-MM-dd_HHmmss.log without Start-Log' {
+    It 'falls back to <base>\Default\<HOSTNAME>_yyyy-MM-dd_HH-mm-ss.log without Start-Log' {
         Stop-Log
         Write-Log 'uninitialized'
 
         $files = @(Get-ChildItem -LiteralPath (Join-Path $logRoot 'Default') -Filter '*.log')
         $files.Count | Should Be 1
-        $files[0].Name | Should Match ('^{0}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{6}}\.log$' -f [regex]::Escape($env:COMPUTERNAME))
+        $files[0].Name | Should Match ('^{0}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}-\d{{2}}\.log$' -f [regex]::Escape($env:COMPUTERNAME))
         (Get-LogLines $files[0].FullName)[0] | Should Match '\[INFO\] uninitialized$'
     }
 }
@@ -120,13 +120,13 @@ Describe 'Retention' {
 
         $now = Get-Date
         for ($i = 1; $i -le 7; $i++) {
-            $path = Join-Path $dir ('{0}_2026-01-0{1}_120000.log' -f $env:COMPUTERNAME, $i)
+            $path = Join-Path $dir ('{0}_2026-01-0{1}_12-00-00.log' -f $env:COMPUTERNAME, $i)
             Set-Content -LiteralPath $path -Value 'old'
             (Get-Item -LiteralPath $path).LastWriteTime = $now.AddDays(-10 + $i)   # file 7 is the newest
         }
         $foreign = @(
-            (Join-Path $dir 'OTHERHOST_2026-01-01_120000.log'),
-            (Join-Path $dir ('{0}X_2026-01-01_120000.log' -f $env:COMPUTERNAME))
+            (Join-Path $dir 'OTHERHOST_2026-01-01_12-00-00.log'),
+            (Join-Path $dir ('{0}X_2026-01-01_12-00-00.log' -f $env:COMPUTERNAME))
         )
         foreach ($path in $foreign) {
             Set-Content -LiteralPath $path -Value 'foreign'
@@ -138,9 +138,9 @@ Describe 'Retention' {
 
         $own = @(Get-ChildItem -LiteralPath $dir -Filter ('{0}_*.log' -f $env:COMPUTERNAME))
         $own.Count | Should Be 3
-        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-07_120000.log' -f $env:COMPUTERNAME)) | Should Be $true
-        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-06_120000.log' -f $env:COMPUTERNAME)) | Should Be $true
-        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-05_120000.log' -f $env:COMPUTERNAME)) | Should Be $false
+        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-07_12-00-00.log' -f $env:COMPUTERNAME)) | Should Be $true
+        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-06_12-00-00.log' -f $env:COMPUTERNAME)) | Should Be $true
+        Test-Path -LiteralPath (Join-Path $dir ('{0}_2026-01-05_12-00-00.log' -f $env:COMPUTERNAME)) | Should Be $false
         foreach ($path in $foreign) {
             Test-Path -LiteralPath $path | Should Be $true
         }

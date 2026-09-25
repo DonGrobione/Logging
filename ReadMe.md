@@ -3,7 +3,7 @@
 A PowerShell module that gives all your scripts the same log format and log location.
 
 - One timestamped line per entry. Multi-line messages and error details continue on lines indented with `    -> `.
-- Logs go to `<Documents>\Logs\<Project>\<HOSTNAME>_yyyy-MM-dd_HHmmss.log`.
+- Logs go to `<Documents>\Logs\<Project>\<HOSTNAME>_yyyy-MM-dd_HH-mm-ss.log`.
 - Writes are retried when a cloud sync client briefly locks the file.
 - Old log files are cleaned up automatically, and only files from the current computer are touched.
 - **The module never throws.** If a log entry can't be written, it is shown as a console warning instead, and your script keeps running.
@@ -104,7 +104,7 @@ Start-Log -LogDirectory   'Sync-ADUsers' `
 | Parameter         | Default                             | Meaning |
 |-------------------|-------------------------------------|---------|
 | `-LogDirectory`   | `Default`                           | Subfolder under `<Documents>\Logs`, usually the project name. |
-| `-LogFileName`    | `<HOSTNAME>_yyyy-MM-dd_HHmmss.log`  | Name of the log file. |
+| `-LogFileName`    | `<HOSTNAME>_yyyy-MM-dd_HH-mm-ss.log`  | Name of the log file. |
 | `-RetentionCount` | `5`                                 | How many `<HOSTNAME>_*.log` files to keep in the folder, including the current one. Files from other computers are never deleted. |
 | `-MinimumLevel`   | `INFO`                              | Entries below this level are not written. Order: `DEBUG` < `INFO` < `WARN` < `ERROR` < `FATAL`. |
 | `-RetryCount`     | `3`                                 | Total number of attempts per write. |

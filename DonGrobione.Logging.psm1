@@ -48,7 +48,7 @@ function Get-LogTimestamp {
 }
 
 function Get-DefaultLogFileName {
-    '{0}_{1}.log' -f $env:COMPUTERNAME, (Get-LogTimestamp -Format 'yyyy-MM-dd_HHmmss')
+    '{0}_{1}.log' -f $env:COMPUTERNAME, (Get-LogTimestamp -Format 'yyyy-MM-dd_HH-mm-ss')
 }
 
 function Write-LogFallback {
@@ -254,7 +254,7 @@ function Start-Log {
         Project/application subfolder under <MyDocuments>\Logs. Default: 'Default'.
 
     .PARAMETER LogFileName
-        Log file name. Default: '<HOSTNAME>_yyyy-MM-dd_HHmmss.log'.
+        Log file name. Default: '<HOSTNAME>_yyyy-MM-dd_HH-mm-ss.log'.
 
     .PARAMETER RetentionCount
         Maximum number of '<HOSTNAME>_*.log' files kept in the log directory,
