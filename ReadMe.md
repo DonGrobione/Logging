@@ -167,6 +167,27 @@ exit $exitCode
 
 A runnable version is in [Examples/Invoke-OrchestratorExample.ps1](Examples/Invoke-OrchestratorExample.ps1).
 
+## Checking for a running session
+
+`Test-LogSession` returns `$true` while a session is active and `$false` otherwise. A sub-script can use it to log into its caller's session when there is one, and to start its own when it runs alone:
+
+```powershell
+$ownSession = -not (Test-LogSession)
+if ($ownSession) {
+    Start-Log -LogDirectory 'Sync-ADUsers'
+}
+try {
+    Write-Log 'Sub-script started'
+    # ...
+}
+finally {
+    # Only end the session this script started, not the caller's.
+    if ($ownSession) { Stop-Log }
+}
+```
+
+A `Write-Log` call without `Start-Log` also starts a session (with the default configuration), so `Test-LogSession` returns `$true` after it.
+
 ## Running the tests
 
 The tests use Pester 3.4, which comes with Windows PowerShell 5.1:

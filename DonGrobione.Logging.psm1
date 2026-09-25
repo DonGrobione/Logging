@@ -436,6 +436,39 @@ function Stop-Log {
     $script:LogConfig = $null
 }
 
+function Test-LogSession {
+    <#
+    .SYNOPSIS
+        Tells whether a logging session is running.
+
+    .DESCRIPTION
+        Returns $true if a configuration is active, either from Start-Log or
+        from the default configuration that Write-Log sets up when it is
+        called without Start-Log. Returns $false before the first Start-Log
+        or Write-Log and after Stop-Log.
+
+        Sub-scripts use it to decide whether to call Start-Log themselves or
+        to log into the session of the script that called them. Never throws.
+
+    .OUTPUTS
+        System.Boolean
+
+    .EXAMPLE
+        if (-not (Test-LogSession)) { Start-Log -LogDirectory 'Sync-ADUsers' }
+
+    .LINK
+        Start-Log
+
+    .LINK
+        Stop-Log
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    $null -ne $script:LogConfig
+}
+
 function Update-DonGrobioneLogging {
     <#
     .SYNOPSIS
@@ -590,4 +623,4 @@ function Update-DonGrobioneLogging {
     $result
 }
 
-Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log, Update-DonGrobioneLogging
+Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log, Test-LogSession, Update-DonGrobioneLogging

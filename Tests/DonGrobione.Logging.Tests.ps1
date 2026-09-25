@@ -258,6 +258,35 @@ Describe 'Retry' {
     }
 }
 
+Describe 'Session' {
+    Mock -ModuleName DonGrobione.Logging Get-LogBasePath { [System.IO.Path]::Combine($TestDrive, 'Logs') }
+
+    BeforeEach {
+        Stop-Log
+    }
+
+    It 'returns false before any session is started' {
+        Test-LogSession | Should Be $false
+    }
+
+    It 'returns true after Start-Log and false after Stop-Log' {
+        Start-Log -LogDirectory (New-TestDirectoryName)
+        Test-LogSession | Should Be $true
+
+        Stop-Log
+        Test-LogSession | Should Be $false
+    }
+
+    It 'returns true after Write-Log falls back to the default configuration' {
+        Write-Log 'default session'
+        Test-LogSession | Should Be $true
+    }
+
+    It 'returns a boolean' {
+        (Test-LogSession).GetType() | Should Be ([bool])
+    }
+}
+
 Describe 'Update' {
     # Fake release v9.9.9: the API call returns a release object, the download
     # copies a locally built zip, and the install folder lives in TestDrive.
