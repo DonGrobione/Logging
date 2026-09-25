@@ -188,6 +188,23 @@ finally {
 
 A `Write-Log` call without `Start-Log` also starts a session (with the default configuration), so `Test-LogSession` returns `$true` after it.
 
+## Reading the session settings
+
+`Get-LogSession` returns the settings of the running session: `Directory`, `FilePath`, `RetentionCount`, `MinimumLevel`, `RetryCount` and `RetryDelayMs`.
+It returns `$null` when no session is running, and it never starts one.
+The result is a copy, so changing it does not change the session.
+
+For example, to write a report next to the log files:
+
+```powershell
+$session = Get-LogSession
+if ($session) {
+    $users | Export-Csv -Path (Join-Path $session.Directory 'Users.csv') -NoTypeInformation
+}
+```
+
+Retention only deletes `<HOSTNAME>_*.log` files, so other files in the log directory are kept.
+
 ## Running the tests
 
 The tests use Pester 3.4, which comes with Windows PowerShell 5.1:

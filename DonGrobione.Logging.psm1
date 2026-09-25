@@ -469,6 +469,57 @@ function Test-LogSession {
     $null -ne $script:LogConfig
 }
 
+function Get-LogSession {
+    <#
+    .SYNOPSIS
+        Returns the configuration of the running logging session.
+
+    .DESCRIPTION
+        Returns a copy of the active configuration with the properties
+        Directory, FilePath, RetentionCount, MinimumLevel, RetryCount and
+        RetryDelayMs. Changing the copy does not change the session.
+
+        Returns $null if no session is running, which is exactly when
+        Test-LogSession returns $false. Unlike Write-Log, it never starts a
+        session. Never throws.
+
+    .OUTPUTS
+        System.Management.Automation.PSCustomObject
+
+    .EXAMPLE
+        $csvPath = Join-Path (Get-LogSession).Directory 'Report.csv'
+
+        Writes an extra file next to the log files of the running session.
+
+    .LINK
+        Test-LogSession
+
+    .LINK
+        Start-Log
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    try {
+        $config = $script:LogConfig
+        if ($null -eq $config) {
+            return $null
+        }
+        [pscustomobject]@{
+            Directory      = $config.Directory
+            FilePath       = $config.FilePath
+            RetentionCount = $config.RetentionCount
+            MinimumLevel   = $config.MinimumLevel
+            RetryCount     = $config.RetryCount
+            RetryDelayMs   = $config.RetryDelayMs
+        }
+    }
+    catch {
+        $null
+    }
+}
+
 function Update-DonGrobioneLogging {
     <#
     .SYNOPSIS
@@ -623,4 +674,4 @@ function Update-DonGrobioneLogging {
     $result
 }
 
-Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log, Test-LogSession, Update-DonGrobioneLogging
+Export-ModuleMember -Function Start-Log, Write-Log, Stop-Log, Test-LogSession, Get-LogSession, Update-DonGrobioneLogging

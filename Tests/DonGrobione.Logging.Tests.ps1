@@ -285,6 +285,53 @@ Describe 'Session' {
     It 'returns a boolean' {
         (Test-LogSession).GetType() | Should Be ([bool])
     }
+
+    It 'Get-LogSession returns null before Start-Log and after Stop-Log' {
+        $null -eq (Get-LogSession) | Should Be $true
+
+        Start-Log -LogDirectory (New-TestDirectoryName)
+        Stop-Log
+        $null -eq (Get-LogSession) | Should Be $true
+    }
+
+    It 'Get-LogSession returns the directory and file of the running session' {
+        $dir = New-TestDirectoryName
+        Start-Log -LogDirectory $dir -LogFileName 'Session.log' -RetentionCount 7 -MinimumLevel DEBUG -RetryCount 4 -RetryDelayMs 10
+        $session = Get-LogSession
+
+        $expectedDir = [System.IO.Path]::Combine($TestDrive, 'Logs', $dir)
+        $session.Directory      | Should Be $expectedDir
+        $session.FilePath       | Should Be ([System.IO.Path]::Combine($expectedDir, 'Session.log'))
+        $session.RetentionCount | Should Be 7
+        $session.MinimumLevel   | Should Be 'DEBUG'
+        $session.RetryCount     | Should Be 4
+        $session.RetryDelayMs   | Should Be 10
+    }
+
+    It 'Get-LogSession returns the default session after Write-Log without Start-Log' {
+        Write-Log 'default session'
+        $session = Get-LogSession
+
+        $session.Directory | Should Be ([System.IO.Path]::Combine($TestDrive, 'Logs', 'Default'))
+        Test-Path -LiteralPath $session.FilePath | Should Be $true
+    }
+
+    It 'Get-LogSession does not start a session' {
+        $null = Get-LogSession
+        Test-LogSession | Should Be $false
+    }
+
+    It 'changing the object from Get-LogSession does not change the session' {
+        Start-Log -LogDirectory (New-TestDirectoryName)
+        $original = (Get-LogSession).Directory
+
+        $session = Get-LogSession
+        $session.Directory = 'C:\Elsewhere'
+        $session.MinimumLevel = 'FATAL'
+
+        (Get-LogSession).Directory    | Should Be $original
+        (Get-LogSession).MinimumLevel | Should Be 'INFO'
+    }
 }
 
 Describe 'Update' {
