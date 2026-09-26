@@ -19,29 +19,31 @@ Requires Windows PowerShell 5.1 or later. No other modules are needed.
 
 ## Installation
 
-Run this in PowerShell. It downloads the latest release and installs it into your module folder (`Documents\WindowsPowerShell\Modules`, or `Documents\PowerShell\Modules` in PowerShell 7):
+Run this in PowerShell. It downloads the latest release and installs it into a version folder of your module folder (`Documents\WindowsPowerShell\Modules\DonGrobione.Logging\<version>`, or `Documents\PowerShell\Modules\...` in PowerShell 7):
 
 ```powershell
 irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1 | iex
 ```
 
-To pass options, run the script as a scriptblock instead. `-Scope AllUsers` installs to Program Files (needs an administrator session), and `-Force` reinstalls even if the version is current:
+To pass options, run the script as a scriptblock instead. `-Scope AllUsers` installs to Program Files (needs an administrator session):
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1))) -Scope AllUsers
 ```
 
-The script works like `Update-DonGrobioneLogging`: if the same or a newer version is already installed, it changes nothing. It overwrites the module files but never deletes the folder, and it leaves a git clone alone unless you add `-Force`.
+The installer only adds the new version folder and never touches other installed versions; PowerShell loads the newest one. It checks the package before writing anything and verifies the installed folder afterwards (folder name, `ModuleVersion` and `Import-Module` must match). If that version's folder already exists, it stops with an error: to reinstall, delete that folder first. It leaves a git clone alone. To remove older versions as well, use `Update-DonGrobioneLogging`.
 
-**Manual installation:**
-
-1. Download `DonGrobione.Logging-<version>.zip` from the [latest release](https://github.com/DonGrobione/Logging/releases/latest).
-2. Extract it into your module folder. The zip already contains the `DonGrobione.Logging` folder:
+**Manual installation:** the zip contains a `DonGrobione.Logging` folder with the module files and `Install.ps1`. Copy them into a folder named exactly like the `ModuleVersion` in the manifest, otherwise PowerShell ignores them:
 
 ```powershell
-$modules = "$([Environment]::GetFolderPath('MyDocuments'))\WindowsPowerShell\Modules"
-Expand-Archive -Path "$HOME\Downloads\DonGrobione.Logging-*.zip" -DestinationPath $modules -Force
-Get-ChildItem "$modules\DonGrobione.Logging" | Unblock-File   # remove the "downloaded from the internet" mark
+$zip     = Get-Item "$HOME\Downloads\DonGrobione.Logging-*.zip"   # from the latest release
+$version = $zip.BaseName -replace '^DonGrobione\.Logging-'
+$target  = "$([Environment]::GetFolderPath('MyDocuments'))\WindowsPowerShell\Modules\DonGrobione.Logging\$version"
+$temp    = Join-Path $env:TEMP "DonGrobione.Logging-$version"
+Expand-Archive -Path $zip -DestinationPath $temp -Force
+New-Item -ItemType Directory -Path $target | Out-Null
+Copy-Item "$temp\DonGrobione.Logging\*" $target
+Get-ChildItem $target | Unblock-File   # remove the "downloaded from the internet" mark
 ```
 
 After that, `Import-Module DonGrobione.Logging` works from any script. You can also import the module directly by path, without installing it:
@@ -50,7 +52,7 @@ After that, `Import-Module DonGrobione.Logging` works from any script. You can a
 Import-Module 'C:\Path\To\DonGrobione.Logging\DonGrobione.Logging.psd1'
 ```
 
-**From git instead:** the folder must be named `DonGrobione.Logging`, the same as the module. A plain clone creates a folder called `Logging`, so give the name explicitly. Update a clone with `git pull`, not with `Update-DonGrobioneLogging`.
+**From git instead:** the folder must be named `DonGrobione.Logging`, the same as the module. A plain clone creates a folder called `Logging`, so give the name explicitly. Update a clone with `git pull`; `Update-DonGrobioneLogging` and the installer leave it alone. Don't mix a clone with version folders: PowerShell always prefers a version folder over files directly in `DonGrobione.Logging`.
 
 ```powershell
 git clone https://github.com/DonGrobione/Logging.git "$([Environment]::GetFolderPath('MyDocuments'))\WindowsPowerShell\Modules\DonGrobione.Logging"
@@ -58,25 +60,33 @@ git clone https://github.com/DonGrobione/Logging.git "$([Environment]::GetFolder
 
 ## Updating
 
-`Update-DonGrobioneLogging` checks the latest GitHub release and compares its version with the version installed in the default module folder. If the release is newer, it downloads the zip and overwrites the installed module files.
+`Update-DonGrobioneLogging` checks the latest GitHub release and compares its version with the newest version installed in the default module folder. If the release is newer, it installs it into its own version folder, verifies it, and only then removes the older versions.
 
 ```powershell
 Update-DonGrobioneLogging            # update if a newer release exists
 Update-DonGrobioneLogging -WhatIf    # only show whether an update is available
-Update-DonGrobioneLogging -Force     # reinstall even if the version is current
 ```
 
 ```
-InstalledVersion LatestVersion Path                                                         Updated
----------------- ------------- ----                                                         -------
-1.0.0            1.1.0         C:\Users\me\Documents\WindowsPowerShell\Modules\DonGrobione.Logging True
+InstalledVersion LatestVersion Path                                                                Updated
+---------------- ------------- ----                                                                -------
+1.2.1            1.3.0         C:\Users\me\Documents\WindowsPowerShell\Modules\DonGrobione.Logging\1.3.0 True
 ```
 
-- **Where it installs:** `Documents\WindowsPowerShell\Modules\DonGrobione.Logging` (or `Documents\PowerShell\Modules` in PowerShell 7). Use `-Scope AllUsers` for `Program Files\...\Modules`; that needs an administrator session.
+- **Where it installs:** `Documents\WindowsPowerShell\Modules\DonGrobione.Logging\<version>` (or `Documents\PowerShell\Modules\...` in PowerShell 7). Use `-Scope AllUsers` for `Program Files\...\Modules`; that needs an administrator session.
 - **First install:** if the module isn't installed there yet, it installs it. So you can also import the module by path once and run `Update-DonGrobioneLogging` to install it.
-- **Safety:** the downloaded package is checked before anything is overwritten. A folder that is a git clone is left alone unless you add `-Force`.
-- **After updating:** your current PowerShell session still uses the old version. Open a new session, or run `Import-Module DonGrobione.Logging -Force`.
-- **Errors:** unlike the logging functions, the updater reports problems (for example, no internet connection) as normal PowerShell errors.
+- **Safety:** the package's version is checked before anything is written. The new version folder must pass the same checks as with the installer; if it doesn't, it is removed again and the installed version stays as it was. A git clone is left alone.
+- **Old versions:** after a successful update, all older versions in that module folder are removed. If one of their files is in use (for example by another session or the sync client), that version stays and you get a warning; close the other sessions and run `Update-DonGrobioneLogging` again to remove it.
+- **Existing version folder:** if the folder for the latest version already exists but isn't a valid installation, the update stops with an error. Delete that folder and run it again.
+- **After updating:** if your session loaded the module from the folder that was updated, the new version is loaded in its place. That ends a running logging session, as `Stop-Log` does, so update before `Start-Log`. Other open sessions keep the old version until they are restarted.
+- **Errors:** unlike the logging functions, the updater reports problems (for example, no internet connection) as normal PowerShell errors. On a failed update, `-ErrorVariable` can hold more than one record; the last one is the updater's summary.
+
+**Upgrading from 1.2.1 or older:** those versions installed the files directly into `Modules\DonGrobione.Logging`, without a version folder. Nothing needs to be done by hand:
+
+1. Run `Update-DonGrobioneLogging` as usual. The old updater still understands the release zip, so it installs the new version in the old layout.
+2. Run `Update-DonGrobioneLogging` once more, in a new session. The new updater finds the old layout, installs the latest release into its version folder, verifies it, and then deletes only the old module files (`DonGrobione.Logging.psd1`, `.psm1`, `LICENSE`, `ReadMe.md`, `Install.ps1`) from `Modules\DonGrobione.Logging`.
+
+Running the installer on an old installation also works: it adds the version folder, which PowerShell prefers from then on, and warns that the old files are still there until the next `Update-DonGrobioneLogging` removes them.
 
 ## Initializing logging in a script
 

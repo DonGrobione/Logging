@@ -334,10 +334,14 @@ Describe 'Session' {
     }
 }
 
+
 Describe 'Update' {
     # Fake release v9.9.9: the API call returns a release object, the download
-    # copies a locally built zip, and the install folder lives in TestDrive.
-    $installPath = [System.IO.Path]::Combine($TestDrive, 'Modules', 'DonGrobione.Logging')
+    # copies download.zip, and the module base folder lives in TestDrive. Each
+    # test picks the package by copying it to download.zip, because in Pester
+    # 3.4 a Mock inside an It stays active for the following Its.
+    $moduleRoot = [System.IO.Path]::Combine($TestDrive, 'Modules', 'DonGrobione.Logging')
+    $newPath    = Join-Path $moduleRoot '9.9.9'
     Mock -ModuleName DonGrobione.Logging Get-ModuleInstallPath { [System.IO.Path]::Combine($TestDrive, 'Modules', 'DonGrobione.Logging') }
     Mock -ModuleName DonGrobione.Logging Invoke-RestMethod {
         [pscustomobject]@{
@@ -349,70 +353,175 @@ Describe 'Update' {
         }
     }
     Mock -ModuleName DonGrobione.Logging Invoke-WebRequest {
-        Copy-Item -LiteralPath ([System.IO.Path]::Combine($TestDrive, 'package.zip')) -Destination $OutFile
+        Copy-Item -LiteralPath ([System.IO.Path]::Combine($TestDrive, 'download.zip')) -Destination $OutFile
     }
 
-    $packageDir = [System.IO.Path]::Combine($TestDrive, 'package', 'DonGrobione.Logging')
-    $null = New-Item -ItemType Directory -Path $packageDir
-    Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psd1') -Value "@{ ModuleVersion = '9.9.9' }"
-    Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psm1') -Value '# new version'
-    Compress-Archive -Path $packageDir -DestinationPath ([System.IO.Path]::Combine($TestDrive, 'package.zip'))
+    function Use-TestPackage {
+        param([string]$Name)
+        Copy-Item -LiteralPath ([System.IO.Path]::Combine($TestDrive, "$Name.zip")) -Destination ([System.IO.Path]::Combine($TestDrive, 'download.zip')) -Force
+    }
 
+    # Same layout as the release zip: one top-level folder named like the module.
+    function New-TestPackage {
+        param([string]$Name, [string]$Version, [string]$ModuleCode)
+        $packageDir = [System.IO.Path]::Combine($TestDrive, $Name, 'DonGrobione.Logging')
+        $null = New-Item -ItemType Directory -Path $packageDir
+        Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psd1') -Value "@{ RootModule = 'DonGrobione.Logging.psm1'; ModuleVersion = '$Version' }"
+        Set-Content -LiteralPath (Join-Path $packageDir 'DonGrobione.Logging.psm1') -Value $ModuleCode
+        Compress-Archive -Path $packageDir -DestinationPath ([System.IO.Path]::Combine($TestDrive, "$Name.zip"))
+    }
+    New-TestPackage -Name 'package' -Version '9.9.9' -ModuleCode '# new version'
+    New-TestPackage -Name 'broken' -Version '9.9.9' -ModuleCode 'function Get-Broken {'
+    New-TestPackage -Name 'wrongversion' -Version '9.9.8' -ModuleCode '# wrong version'
+
+    # Creates <moduleRoot>\<FolderName>\, or with -Legacy the flat layout of
+    # versions up to 1.2.1. Returns the folder.
     function Set-InstalledVersion {
-        param([string]$Version)
-        $null = New-Item -ItemType Directory -Path $installPath -Force
-        Set-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psd1') -Value "@{ ModuleVersion = '$Version' }"
-        Set-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') -Value '# old version'
+        param([string]$Version, [switch]$Legacy, [string]$FolderName = $Version)
+        $path = if ($Legacy) { $moduleRoot } else { Join-Path $moduleRoot $FolderName }
+        $null = New-Item -ItemType Directory -Path $path -Force
+        Set-Content -LiteralPath (Join-Path $path 'DonGrobione.Logging.psd1') -Value "@{ RootModule = 'DonGrobione.Logging.psm1'; ModuleVersion = '$Version' }"
+        Set-Content -LiteralPath (Join-Path $path 'DonGrobione.Logging.psm1') -Value '# old version'
+        if ($Legacy) {
+            Set-Content -LiteralPath (Join-Path $path 'LICENSE') -Value 'old'
+            Set-Content -LiteralPath (Join-Path $path 'Install.ps1') -Value 'old'
+            Set-Content -LiteralPath (Join-Path $path 'ReadMe.md') -Value 'old'
+        }
+        $path
     }
 
-    function Get-InstalledVersion {
-        [version](Import-PowerShellDataFile -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psd1')).ModuleVersion
+    function Get-FolderVersion {
+        param([string]$Path)
+        [version](Import-PowerShellDataFile -LiteralPath (Join-Path $Path 'DonGrobione.Logging.psd1')).ModuleVersion
     }
 
     BeforeEach {
-        if (Test-Path -LiteralPath $installPath) {
-            Remove-Item -LiteralPath $installPath -Recurse -Force
+        if (Test-Path -LiteralPath $moduleRoot) {
+            Remove-Item -LiteralPath $moduleRoot -Recurse -Force
         }
+        Use-TestPackage 'package'
     }
 
-    It 'installs the latest release when the module is not installed' {
-        $result = Update-DonGrobioneLogging
+    It 'installs the latest release into its version folder' {
+        $result = Update-DonGrobioneLogging -ErrorVariable updateErrors
         $result.Updated | Should Be $true
+        $updateErrors.Count | Should Be 0
         $result.InstalledVersion | Should BeNullOrEmpty
-        Get-InstalledVersion | Should Be ([version]'9.9.9')
+        $result.Path | Should Be $newPath
+        Get-FolderVersion $newPath | Should Be ([version]'9.9.9')
+        Get-Content -LiteralPath (Join-Path $newPath 'DonGrobione.Logging.psm1') | Should Be '# new version'
+        Join-Path $moduleRoot 'DonGrobione.Logging.psd1' | Should Not Exist
     }
 
-    It 'overwrites an older installed version' {
-        Set-InstalledVersion '1.0.0'
+    It 'installs next to an older version and then removes it' {
+        $oldPath = Set-InstalledVersion '1.0.0'
+        $result = Update-DonGrobioneLogging -ErrorVariable updateErrors
+        $result.Updated | Should Be $true
+        $updateErrors.Count | Should Be 0
+        $result.InstalledVersion | Should Be ([version]'1.0.0')
+        Get-FolderVersion $newPath | Should Be ([version]'9.9.9')
+        $oldPath | Should Not Exist
+    }
+
+    It 'migrates the legacy layout without a version folder' {
+        $null = Set-InstalledVersion '1.0.0' -Legacy
         $result = Update-DonGrobioneLogging
         $result.Updated | Should Be $true
         $result.InstalledVersion | Should Be ([version]'1.0.0')
-        Get-InstalledVersion | Should Be ([version]'9.9.9')
-        Get-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') | Should Be '# new version'
+        Get-FolderVersion $newPath | Should Be ([version]'9.9.9')
+        foreach ($file in 'DonGrobione.Logging.psd1', 'DonGrobione.Logging.psm1', 'LICENSE', 'ReadMe.md', 'Install.ps1') {
+            Join-Path $moduleRoot $file | Should Not Exist
+        }
     }
 
-    It 'does not download when the installed version is up to date' {
-        Set-InstalledVersion '9.9.9'
+    It 'removes a leftover legacy installation when the version folder is up to date' {
+        $null = Set-InstalledVersion '9.9.9'
+        $null = Set-InstalledVersion '1.0.0' -Legacy
         $result = Update-DonGrobioneLogging
         $result.Updated | Should Be $false
         Assert-MockCalled -ModuleName DonGrobione.Logging Invoke-WebRequest -Times 0 -Exactly -Scope It
-        Get-Content -LiteralPath (Join-Path $installPath 'DonGrobione.Logging.psm1') | Should Be '# old version'
+        Join-Path $moduleRoot 'DonGrobione.Logging.psd1' | Should Not Exist
+        Get-Content -LiteralPath (Join-Path $newPath 'DonGrobione.Logging.psm1') | Should Be '# old version'
+    }
+
+    It 'does not download when the installed version is up to date' {
+        $null = Set-InstalledVersion '9.9.9'
+        $result = Update-DonGrobioneLogging
+        $result.Updated | Should Be $false
+        $result.Path | Should Be $newPath
+        Assert-MockCalled -ModuleName DonGrobione.Logging Invoke-WebRequest -Times 0 -Exactly -Scope It
+        Get-Content -LiteralPath (Join-Path $newPath 'DonGrobione.Logging.psm1') | Should Be '# old version'
     }
 
     It 'does not change anything with -WhatIf' {
-        Set-InstalledVersion '1.0.0'
+        $oldPath = Set-InstalledVersion '1.0.0'
         $result = Update-DonGrobioneLogging -WhatIf
         $result.Updated | Should Be $false
-        Get-InstalledVersion | Should Be ([version]'1.0.0')
+        $newPath | Should Not Exist
+        Get-FolderVersion $oldPath | Should Be ([version]'1.0.0')
     }
 
-    It 'refuses to overwrite a git clone without -Force' {
-        Set-InstalledVersion '1.0.0'
-        $null = New-Item -ItemType Directory -Path (Join-Path $installPath '.git')
+    It 'refuses to change a git clone' {
+        $null = Set-InstalledVersion '1.0.0' -Legacy
+        $null = New-Item -ItemType Directory -Path (Join-Path $moduleRoot '.git')
         $result = Update-DonGrobioneLogging -ErrorAction SilentlyContinue -ErrorVariable updateErrors
         $result.Updated | Should Be $false
         $updateErrors.Count | Should Be 1
         "$($updateErrors[0])" | Should Match 'git pull'
-        Get-InstalledVersion | Should Be ([version]'1.0.0')
+        Get-FolderVersion $moduleRoot | Should Be ([version]'1.0.0')
+        $newPath | Should Not Exist
+    }
+
+    It 'aborts if the version folder exists but does not match its manifest' {
+        $oldPath = Set-InstalledVersion '1.0.0'
+        $null = Set-InstalledVersion '1.0.0' -FolderName '9.9.9'
+        $result = Update-DonGrobioneLogging -ErrorAction SilentlyContinue -ErrorVariable updateErrors -WarningAction SilentlyContinue
+        $result.Updated | Should Be $false
+        $updateErrors.Count | Should Be 1
+        "$($updateErrors[0])" | Should Match 'already exists'
+        Assert-MockCalled -ModuleName DonGrobione.Logging Invoke-WebRequest -Times 0 -Exactly -Scope It
+        Get-FolderVersion $oldPath | Should Be ([version]'1.0.0')
+    }
+
+    It 'keeps the old version if the new one fails to import' {
+        Use-TestPackage 'broken'
+        $oldPath = Set-InstalledVersion '1.0.0'
+        $result = Update-DonGrobioneLogging -ErrorAction SilentlyContinue -ErrorVariable updateErrors
+        $result.Updated | Should Be $false
+        # 5.1 also records the exceptions caught on the way; the last record is the summary.
+        "$($updateErrors[-1])" | Should Match 'unchanged.*Import-Module'
+        $newPath | Should Not Exist
+        Get-FolderVersion $oldPath | Should Be ([version]'1.0.0')
+    }
+
+    It 'keeps the old version if the package has a different version' {
+        Use-TestPackage 'wrongversion'
+        $oldPath = Set-InstalledVersion '1.0.0'
+        $result = Update-DonGrobioneLogging -ErrorAction SilentlyContinue -ErrorVariable updateErrors
+        $result.Updated | Should Be $false
+        "$($updateErrors[-1])" | Should Match 'unchanged.*9\.9\.8'
+        $newPath | Should Not Exist
+        Join-Path $moduleRoot '9.9.8' | Should Not Exist
+        Get-FolderVersion $oldPath | Should Be ([version]'1.0.0')
+    }
+
+    It 'leaves an old version whose files are in use and removes it on the next run' {
+        $oldPath = Set-InstalledVersion '1.0.0'
+        $stream = [System.IO.File]::Open((Join-Path $oldPath 'DonGrobione.Logging.psm1'), 'Open', 'Read', 'None')
+        try {
+            $result = Update-DonGrobioneLogging -WarningAction SilentlyContinue -WarningVariable updateWarnings
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $result.Updated | Should Be $true
+        Get-FolderVersion $newPath | Should Be ([version]'9.9.9')
+        $oldPath | Should Exist
+        $updateWarnings.Count | Should Be 1
+        "$($updateWarnings[0])" | Should Match 'in use'
+
+        $result = Update-DonGrobioneLogging
+        $result.Updated | Should Be $false
+        $oldPath | Should Not Exist
     }
 }

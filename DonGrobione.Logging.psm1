@@ -27,6 +27,12 @@ $script:LogEncoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentLis
 $script:ModuleName    = 'DonGrobione.Logging'
 $script:ReleaseApiUrl = 'https://api.github.com/repos/DonGrobione/Logging/releases/latest'
 
+# Files of the legacy flat layout, installed directly into the module base
+# folder. Versions up to 1.2.1 installed the first four; Install.ps1 comes
+# along when the 1.2.1 updater installs a newer release in that layout. Only
+# these are removed when migrating.
+$script:LegacyFiles = @("$script:ModuleName.psd1", "$script:ModuleName.psm1", 'LICENSE', 'ReadMe.md', 'Install.ps1')
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -221,13 +227,271 @@ function Format-LogEntry {
 }
 
 function Get-ModuleInstallPath {
-    # Default module folder of the running edition. Separate function so tests
-    # can mock the install location.
+    # Module base folder of the running edition, <Modules>\DonGrobione.Logging,
+    # which holds one subfolder per installed version. Separate function so
+    # tests can mock the install location.
     param([string]$Scope)
 
     $editionFolder = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'WindowsPowerShell' }
     $root = if ($Scope -eq 'AllUsers') { $env:ProgramFiles } else { [Environment]::GetFolderPath('MyDocuments') }
     [System.IO.Path]::Combine($root, $editionFolder, 'Modules', $script:ModuleName)
+}
+
+function Get-InstalledModuleVersion {
+    # Lists the installed copies below the module base folder: one entry per
+    # version folder (<base>\<version>\) and one for the legacy flat layout
+    # (manifest directly in <base>) that versions up to 1.2.1 installed.
+    # PowerShell ignores a version folder whose manifest version differs from
+    # the folder name, so such a folder is skipped here too.
+    param([string]$ModuleRoot)
+
+    if (-not [System.IO.Directory]::Exists($ModuleRoot)) {
+        return
+    }
+
+    $legacyManifest = Join-Path $ModuleRoot "$script:ModuleName.psd1"
+    if (Test-Path -LiteralPath $legacyManifest) {
+        try {
+            [pscustomobject]@{
+                Version  = [version](Import-PowerShellDataFile -LiteralPath $legacyManifest -ErrorAction Stop).ModuleVersion
+                Path     = $ModuleRoot
+                IsLegacy = $true
+            }
+        }
+        catch {
+            Write-Warning "Could not read the installed version from '$legacyManifest': $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($folder in Get-ChildItem -LiteralPath $ModuleRoot -Directory) {
+        $folderVersion = $null
+        if (-not [version]::TryParse($folder.Name, [ref]$folderVersion)) {
+            continue
+        }
+        $manifest = Join-Path $folder.FullName "$script:ModuleName.psd1"
+        try {
+            $manifestVersion = [version](Import-PowerShellDataFile -LiteralPath $manifest -ErrorAction Stop).ModuleVersion
+        }
+        catch {
+            Write-Warning "Skipped '$($folder.FullName)': could not read its manifest: $($_.Exception.Message)"
+            continue
+        }
+        if ($manifestVersion -ne $folderVersion) {
+            Write-Warning "Skipped '$($folder.FullName)': its manifest has ModuleVersion $manifestVersion."
+            continue
+        }
+        [pscustomobject]@{
+            Version  = $folderVersion
+            Path     = $folder.FullName
+            IsLegacy = $false
+        }
+    }
+}
+
+function ConvertFrom-ManifestText {
+    # Parses manifest text the way Import-PowerShellDataFile does (constant
+    # values only), so a manifest inside a zip can be checked in memory.
+    param([string]$Text)
+
+    $tokens      = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        throw "The manifest is not valid PowerShell: $($parseErrors[0].Message)"
+    }
+    $hashtableAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $false)
+    if ($null -eq $hashtableAst) {
+        throw 'The manifest does not contain a hashtable.'
+    }
+    $hashtableAst.SafeGetValue()
+}
+
+function Confirm-ModuleVersionFolder {
+    # Throws unless <Path> is a working copy of version <ExpectedVersion>: the
+    # folder name, the manifest's ModuleVersion and the imported module's
+    # version must all match, and Import-Module must succeed.
+    param(
+        [string]$Path,
+        [version]$ExpectedVersion
+    )
+
+    $folderName = Split-Path -Path $Path -Leaf
+    if ($folderName -ne $ExpectedVersion.ToString()) {
+        throw "The folder name '$folderName' does not match version $ExpectedVersion."
+    }
+
+    $manifestPath = Join-Path $Path "$script:ModuleName.psd1"
+    $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
+    $manifestVersion = $null
+    if (-not [version]::TryParse([string]$manifest.ModuleVersion, [ref]$manifestVersion) -or $manifestVersion -ne $ExpectedVersion) {
+        throw "The manifest has ModuleVersion '$($manifest.ModuleVersion)', expected $ExpectedVersion to match the folder name."
+    }
+    if ($manifest.RootModule -and -not (Test-Path -LiteralPath (Join-Path $Path $manifest.RootModule))) {
+        throw "The RootModule '$($manifest.RootModule)' named in the manifest is missing."
+    }
+
+    # A separate runspace, because this session may already have another
+    # version of the module loaded.
+    $ps = [powershell]::Create()
+    try {
+        $null = $ps.AddCommand('Import-Module').AddParameter('Name', $manifestPath).AddParameter('PassThru').AddParameter('ErrorAction', 'Stop')
+        $imported = @($ps.Invoke())
+    }
+    catch {
+        $reason = $_.Exception
+        if ($null -ne $reason.InnerException) {
+            $reason = $reason.InnerException
+        }
+        throw "Import-Module failed: $($reason.Message)"
+    }
+    finally {
+        $ps.Dispose()
+    }
+    if ($imported.Count -ne 1 -or $imported[0].Version -ne $ExpectedVersion) {
+        throw "Import-Module did not load version $ExpectedVersion."
+    }
+}
+
+function Install-ModulePackage {
+    # Extracts the module from the release zip directly into
+    # <ModuleRoot>\<version>\ (no staging folder) and verifies it. The zip has
+    # one top-level folder named like the module (built by release.yml). The
+    # version folder must not exist yet. If anything fails after it was
+    # created, it is removed again; other version folders are never touched.
+    # Returns the path of the new version folder.
+    param(
+        [string]$ZipPath,
+        [string]$ModuleRoot,
+        [version]$ExpectedVersion
+    )
+
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $prefix     = "$script:ModuleName/"
+    $targetPath = $null
+    $created    = $false
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        try {
+            # Compress-Archive in 5.1 writes '\' as the separator.
+            $entries = @($archive.Entries | Where-Object {
+                ($_.FullName -replace '\\', '/').StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+            $manifestEntries = @($entries | Where-Object { ($_.FullName -replace '\\', '/') -eq "$prefix$script:ModuleName.psd1" })
+            if ($manifestEntries.Count -eq 0) {
+                throw "The package does not contain '$script:ModuleName\$script:ModuleName.psd1'."
+            }
+
+            # Check the version before anything is written.
+            $reader = New-Object -TypeName System.IO.StreamReader -ArgumentList $manifestEntries[0].Open()
+            try {
+                $manifest = ConvertFrom-ManifestText -Text $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+            $packageVersion = $null
+            if (-not [version]::TryParse([string]$manifest.ModuleVersion, [ref]$packageVersion)) {
+                throw "The package manifest has no valid ModuleVersion."
+            }
+            if ($packageVersion -ne $ExpectedVersion) {
+                throw "The package contains version $packageVersion, expected $ExpectedVersion."
+            }
+
+            $targetPath = [System.IO.Path]::Combine($ModuleRoot, $packageVersion.ToString())
+            if (Test-Path -LiteralPath $targetPath) {
+                throw "'$targetPath' already exists. Remove that folder first, or release a higher ModuleVersion."
+            }
+            # Without -Force, New-Item fails if the folder appeared in the meantime.
+            $null = New-Item -ItemType Directory -Path $targetPath -ErrorAction Stop
+            $created = $true
+
+            $targetPrefix = [System.IO.Path]::GetFullPath($targetPath).TrimEnd('\') + '\'
+            foreach ($entry in $entries) {
+                $relative = ($entry.FullName -replace '\\', '/').Substring($prefix.Length)
+                if ($relative -eq '') {
+                    continue
+                }
+                $destination = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($targetPath, $relative))
+                if (-not $destination.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "The package contains an invalid path '$($entry.FullName)'."
+                }
+                if ($relative.EndsWith('/')) {
+                    $null = [System.IO.Directory]::CreateDirectory($destination)
+                    continue
+                }
+                $null = [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination))
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destination, $false)
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        Confirm-ModuleVersionFolder -Path $targetPath -ExpectedVersion $ExpectedVersion
+    }
+    catch {
+        if ($created) {
+            Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    $targetPath
+}
+
+function Get-LockedFile {
+    # Returns the first file below the given files or folders that another
+    # process has open, or $null. A loaded script module holds no handle on
+    # its .psm1, but a loaded DLL, an editor or the sync client does.
+    param([string[]]$Path)
+
+    foreach ($item in $Path) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $item -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+            try {
+                $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'None')
+                $stream.Dispose()
+            }
+            catch {
+                return $file.FullName
+            }
+        }
+    }
+    $null
+}
+
+function Remove-InstalledModuleVersion {
+    # Removes one entry from Get-InstalledModuleVersion: a version folder, or
+    # only the module files of the legacy flat layout (never the base folder,
+    # which holds the version folders). Returns $true on success. If a file is
+    # in use nothing is removed; the next Update-DonGrobioneLogging retries.
+    param([pscustomobject]$Installed)
+
+    if ($Installed.IsLegacy) {
+        $targets = @($script:LegacyFiles | ForEach-Object { Join-Path $Installed.Path $_ } | Where-Object { Test-Path -LiteralPath $_ })
+    }
+    else {
+        $targets = @($Installed.Path)
+    }
+    $hint = "Close all PowerShell sessions that use $script:ModuleName and run Update-DonGrobioneLogging again, or delete it by hand."
+
+    $locked = Get-LockedFile -Path $targets
+    if ($null -ne $locked) {
+        Write-Warning "Version $($Installed.Version) in '$($Installed.Path)' was not removed because '$locked' is in use. $hint"
+        return $false
+    }
+
+    $result = Invoke-WithRetry -RetryCount 3 -RetryDelayMs 500 -Action {
+        foreach ($target in $targets) {
+            if (Test-Path -LiteralPath $target) {
+                Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+            }
+        }
+    }
+    if (-not $result.Success) {
+        Write-Warning "Version $($Installed.Version) in '$($Installed.Path)' was not fully removed: $($result.Error.Message) $hint"
+        return $false
+    }
+    Write-Verbose -Message "Removed version $($Installed.Version) from '$($Installed.Path)'."
+    $true
 }
 
 # ---------------------------------------------------------------------------
@@ -526,36 +790,41 @@ function Update-DonGrobioneLogging {
         Installs the latest release of DonGrobione.Logging from GitHub.
 
     .DESCRIPTION
-        Reads the latest release of https://github.com/DonGrobione/Logging,
-        compares its version with the version installed in the default module
-        folder and, if the release is newer, downloads the release zip and
-        copies the module files over the installed ones.
+        Reads the latest release of https://github.com/DonGrobione/Logging and
+        compares its version with the newest version installed in the module
+        folder of the chosen scope. If the release is newer, it downloads the
+        release zip and extracts it directly into a new version folder:
 
-        Default module folders:
-          CurrentUser: <Documents>\WindowsPowerShell\Modules\DonGrobione.Logging
-          AllUsers:    <ProgramFiles>\WindowsPowerShell\Modules\DonGrobione.Logging
-        (PowerShell 7 uses 'PowerShell' instead of 'WindowsPowerShell'.)
+          CurrentUser: <Documents>\WindowsPowerShell\Modules\DonGrobione.Logging\<version>
+          AllUsers:    <ProgramFiles>\WindowsPowerShell\Modules\DonGrobione.Logging\<version>
+          (PowerShell 7 uses 'PowerShell' instead of 'WindowsPowerShell'.)
 
-        The downloaded package is checked first: it must contain the module
-        manifest with the release's version. Files are overwritten, the folder
-        itself is not deleted. A folder that is a git clone is not touched
-        unless -Force is given; update it with 'git pull' instead.
+        The package's manifest version is checked before anything is written.
+        The new folder is then verified: its name, the manifest's ModuleVersion
+        and the imported version must match, and Import-Module must succeed in
+        a separate runspace. Only after that are the older versions in that
+        folder removed, including an installation in the legacy layout without
+        a version folder (versions up to 1.2.1). If anything fails before, the
+        new folder is removed again and the old version stays as it was.
 
-        The running session keeps the old version. Start a new session or run
-        'Import-Module DonGrobione.Logging -Force' to load the update.
+        An older version whose files are in use is left in place with a
+        warning; the next run removes it. If the version folder of the latest
+        release already exists but is not valid, nothing is changed: remove
+        that folder first. A module folder that is a git clone is never
+        changed; update it with 'git pull'.
+
+        If this session loaded the module from the updated scope, the new
+        version is imported in its place once the old one is removed. This
+        ends a running logging session, as Stop-Log does.
 
         Unlike the logging functions, errors are reported with Write-Error.
 
     .PARAMETER Scope
         CurrentUser (default) or AllUsers. AllUsers requires an elevated session.
 
-    .PARAMETER Force
-        Reinstall even if the installed version is up to date, and overwrite
-        the files of a git clone.
-
     .OUTPUTS
-        An object with InstalledVersion (before the update), LatestVersion,
-        Path and Updated.
+        An object with InstalledVersion (the newest version before the update),
+        LatestVersion, Path (the folder of the latest version) and Updated.
 
     .EXAMPLE
         Update-DonGrobioneLogging
@@ -575,22 +844,12 @@ function Update-DonGrobioneLogging {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
         [ValidateSet('CurrentUser', 'AllUsers')]
-        [string]$Scope = 'CurrentUser',
-
-        [switch]$Force
+        [string]$Scope = 'CurrentUser'
     )
 
-    $installPath      = Get-ModuleInstallPath -Scope $Scope
-    $installedVersion = $null
-    $installedManifest = Join-Path $installPath "$script:ModuleName.psd1"
-    if (Test-Path -LiteralPath $installedManifest) {
-        try {
-            $installedVersion = [version](Import-PowerShellDataFile -LiteralPath $installedManifest).ModuleVersion
-        }
-        catch {
-            Write-Warning "Could not read the installed version from '$installedManifest': $($_.Exception.Message)"
-        }
-    }
+    $moduleRoot       = Get-ModuleInstallPath -Scope $Scope
+    $installed        = @(Get-InstalledModuleVersion -ModuleRoot $moduleRoot | Sort-Object -Property Version -Descending)
+    $installedVersion = if ($installed.Count -gt 0) { $installed[0].Version } else { $null }
 
     $headers = @{ 'User-Agent' = $script:ModuleName; 'Accept' = 'application/vnd.github+json' }
     try {
@@ -620,55 +879,94 @@ function Update-DonGrobioneLogging {
     $result = [pscustomobject]@{
         InstalledVersion = $installedVersion
         LatestVersion    = $latestVersion
-        Path             = $installPath
+        Path             = [System.IO.Path]::Combine($moduleRoot, $latestVersion.ToString())
         Updated          = $false
     }
 
-    if ($null -ne $installedVersion -and $installedVersion -ge $latestVersion -and -not $Force) {
-        Write-Verbose -Message "Version $installedVersion in '$installPath' is up to date."
-        return $result
-    }
-
-    if ((Test-Path -LiteralPath (Join-Path $installPath '.git')) -and -not $Force) {
-        Write-Error "'$installPath' is a git clone. Update it with 'git pull', or use -Force to overwrite its files."
-        return $result
-    }
-
-    $action = if ($null -eq $installedVersion) { "Install version $latestVersion" } else { "Update from version $installedVersion to $latestVersion" }
-    if (-not $PSCmdlet.ShouldProcess($installPath, $action)) {
-        return $result
-    }
-
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('{0}-{1}' -f $script:ModuleName, [guid]::NewGuid().ToString('N'))
-    try {
-        $null = New-Item -ItemType Directory -Path $tempRoot -ErrorAction Stop
-        $zipPath = Join-Path $tempRoot $asset.name
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ 'User-Agent' = $script:ModuleName } -UseBasicParsing -ErrorAction Stop
-
-        $extractPath = Join-Path $tempRoot 'extracted'
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -ErrorAction Stop
-
-        # Validate the package before touching the installed module.
-        $sourcePath     = Join-Path $extractPath $script:ModuleName
-        $sourceManifest = Join-Path $sourcePath "$script:ModuleName.psd1"
-        if (-not (Test-Path -LiteralPath $sourceManifest)) {
-            throw "The package does not contain '$script:ModuleName\$script:ModuleName.psd1'."
+    if (Test-Path -LiteralPath (Join-Path $moduleRoot '.git')) {
+        if ($null -ne $installedVersion -and $installedVersion -ge $latestVersion) {
+            Write-Verbose -Message "The git clone in '$moduleRoot' has version $installedVersion, which is up to date."
+            return $result
         }
-        $packageVersion = [version](Import-PowerShellDataFile -LiteralPath $sourceManifest).ModuleVersion
-        if ($packageVersion -ne $latestVersion) {
-            throw "The package contains version $packageVersion, expected $latestVersion."
+        Write-Error "'$moduleRoot' is a git clone. Update it with 'git pull'."
+        return $result
+    }
+
+    # The legacy flat layout never counts as up to date: it is migrated by
+    # installing the latest release into its version folder.
+    $versioned = @($installed | Where-Object { -not $_.IsLegacy })
+    if ($versioned.Count -gt 0 -and $versioned[0].Version -ge $latestVersion) {
+        $keep = $versioned[0]
+        $result.Path = $keep.Path
+        Write-Verbose -Message "Version $($keep.Version) in '$($keep.Path)' is up to date."
+    }
+    else {
+        if (Test-Path -LiteralPath $result.Path) {
+            Write-Error ("'{0}' already exists but is not a valid installation of version {1}. Remove that folder and run Update-DonGrobioneLogging again." -f
+                $result.Path, $latestVersion)
+            return $result
         }
 
-        $null = New-Item -ItemType Directory -Path $installPath -Force -ErrorAction Stop
-        Copy-Item -Path (Join-Path $sourcePath '*') -Destination $installPath -Recurse -Force -ErrorAction Stop
+        $action = if ($null -eq $installedVersion) { "Install version $latestVersion" } else { "Update from version $installedVersion to $latestVersion" }
+        if (-not $PSCmdlet.ShouldProcess($result.Path, $action)) {
+            return $result
+        }
+
+        $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('{0}-{1}.zip' -f $script:ModuleName, [guid]::NewGuid().ToString('N'))
+        try {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ 'User-Agent' = $script:ModuleName } -UseBasicParsing -ErrorAction Stop
+            $null = Install-ModulePackage -ZipPath $zipPath -ModuleRoot $moduleRoot -ExpectedVersion $latestVersion
+        }
+        catch {
+            Write-Error "Update to version $latestVersion failed, the installed version is unchanged: $($_.Exception.Message)"
+            return $result
+        }
+        finally {
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        }
         $result.Updated = $true
-        Write-Verbose -Message "Installed version $latestVersion to '$installPath'. Start a new session to load it."
+        $keep = [pscustomobject]@{ Version = $latestVersion; Path = $result.Path; IsLegacy = $false }
+        Write-Verbose -Message "Installed version $latestVersion to '$($result.Path)'."
     }
-    catch {
-        Write-Error "Update to version $latestVersion failed: $($_.Exception.Message)"
+
+    # Older versions go only once the kept version is verified. After an
+    # install Install-ModulePackage has verified it; otherwise verify it now.
+    $obsolete   = @($installed | Where-Object { $_.Path -ne $keep.Path })
+    $allRemoved = $true
+    if ($obsolete.Count -gt 0) {
+        if (-not $result.Updated) {
+            try {
+                Confirm-ModuleVersionFolder -Path $keep.Path -ExpectedVersion $keep.Version
+            }
+            catch {
+                Write-Error "Older versions were not removed because version $($keep.Version) in '$($keep.Path)' failed verification: $($_.Exception.Message)"
+                return $result
+            }
+        }
+        foreach ($old in $obsolete) {
+            $what = if ($old.IsLegacy) { "Remove version $($old.Version) (legacy layout without a version folder)" } else { "Remove version $($old.Version)" }
+            if (-not $PSCmdlet.ShouldProcess($old.Path, $what) -or -not (Remove-InstalledModuleVersion -Installed $old)) {
+                $allRemoved = $false
+            }
+        }
     }
-    finally {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Reload only if this session runs a copy from this scope that was just
+    # replaced. Import first, then remove, so a failed import keeps the old one.
+    $thisModule = $MyInvocation.MyCommand.Module
+    if ($allRemoved -and $null -ne $thisModule) {
+        $loadedBase = $thisModule.ModuleBase.TrimEnd('\')
+        $fromScope  = $loadedBase -eq $moduleRoot -or $loadedBase.StartsWith($moduleRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)
+        if ($fromScope -and $loadedBase -ne $keep.Path) {
+            try {
+                Import-Module -Name (Join-Path $keep.Path "$script:ModuleName.psd1") -Global -Force -ErrorAction Stop
+                Remove-Module -ModuleInfo $thisModule -Force -ErrorAction Stop
+                Write-Verbose -Message "Loaded version $($keep.Version) in this session."
+            }
+            catch {
+                Write-Warning "Could not load version $($keep.Version) in this session: $($_.Exception.Message) Start a new session to use it."
+            }
+        }
     }
 
     $result
