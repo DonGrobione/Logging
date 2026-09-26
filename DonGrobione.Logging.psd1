@@ -1,6 +1,6 @@
 @{
     RootModule        = 'DonGrobione.Logging.psm1'
-    ModuleVersion     = '1.2.1'
+    ModuleVersion     = '2.0.0'
     GUID              = 'a87bc0f6-3f00-4785-963a-ba5275f88b43'
     Author            = 'DonGrobione'
     Copyright         = '(c) 2026 DonGrobione. Licensed under the GNU AGPL v3.'
