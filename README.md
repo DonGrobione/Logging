@@ -31,6 +31,8 @@ To pass options, run the script as a scriptblock instead. `-Scope AllUsers` inst
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1))) -Scope AllUsers
 ```
 
+Run this way, the installer also supports `-WhatIf` (show where it would install, without installing) and `-Confirm`. With `irm | iex`, PowerShell ignores these parameters.
+
 The installer only adds the new version folder and never touches other installed versions; PowerShell loads the newest one. It checks the package before writing anything and verifies the installed folder afterwards (folder name, `ModuleVersion` and `Import-Module` must match). If that version's folder already exists, it stops with an error: to reinstall, delete that folder first. It leaves a git clone alone. To remove older versions as well, use `Update-DonGrobioneLogging`.
 
 **Manual installation:** the zip contains a `DonGrobione.Logging` folder with the module files and `Install.ps1`. Copy them into a folder named exactly like the `ModuleVersion` in the manifest, otherwise PowerShell ignores them:
@@ -84,7 +86,7 @@ InstalledVersion LatestVersion Path                                             
 **Upgrading from 1.2.1 or older:** those versions installed the files directly into `Modules\DonGrobione.Logging`, without a version folder. Nothing needs to be done by hand:
 
 1. Run `Update-DonGrobioneLogging` as usual. The old updater still understands the release zip, so it installs the new version in the old layout.
-2. Run `Update-DonGrobioneLogging` once more, in a new session. The new updater finds the old layout, installs the latest release into its version folder, verifies it, and then deletes only the old module files (`DonGrobione.Logging.psd1`, `.psm1`, `LICENSE`, `ReadMe.md`, `Install.ps1`) from `Modules\DonGrobione.Logging`.
+2. Run `Update-DonGrobioneLogging` once more, in a new session. The new updater finds the old layout, installs the latest release into its version folder, verifies it, and then deletes only the old module files (`DonGrobione.Logging.psd1`, `.psm1`, `LICENSE`, `ReadMe.md` or `README.md`, `Install.ps1`) from `Modules\DonGrobione.Logging`.
 
 Running the installer on an old installation also works: it adds the version folder, which PowerShell prefers from then on, and warns that the old files are still there until the next `Update-DonGrobioneLogging` removes them.
 
@@ -119,6 +121,8 @@ Start-Log -LogDirectory   'Sync-ADUsers' `
 | `-MinimumLevel`   | `INFO`                              | Entries below this level are not written. Order: `DEBUG` < `INFO` < `WARN` < `ERROR` < `FATAL`. |
 | `-RetryCount`     | `3`                                 | Total number of attempts per write. |
 | `-RetryDelayMs`   | `500`                               | Wait before the first retry. Each later retry waits longer (500 ms, then 1000 ms, and so on). |
+
+`Start-Log` and `Stop-Log` support `-WhatIf` and `-Confirm`. `Start-Log -WhatIf` changes nothing: it starts no session, creates no directory and deletes no old log file. With `-Confirm`, each old log file must be confirmed before retention deletes it. `Stop-Log -WhatIf` leaves the session running.
 
 **Without initialization.** If you call `Write-Log` without `Start-Log`, it logs to `<Documents>\Logs\Default\` with the default settings:
 
@@ -224,6 +228,16 @@ powershell -NoProfile -Command "Invoke-Pester -Script .\Tests"
 ```
 
 GitHub Actions runs the same tests on Windows PowerShell 5.1 for every push and pull request. A release is only published if they pass.
+
+The code is kept free of PSScriptAnalyzer warnings (default rule set). If you have PSScriptAnalyzer installed, check it with:
+
+```powershell
+Get-ChildItem -Recurse -Include *.ps1, *.psm1, *.psd1 | ForEach-Object { Invoke-ScriptAnalyzer -Path $_.FullName }
+```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

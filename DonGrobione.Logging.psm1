@@ -30,8 +30,9 @@ $script:ReleaseApiUrl = 'https://api.github.com/repos/DonGrobione/Logging/releas
 # Files of the legacy flat layout, installed directly into the module base
 # folder. Versions up to 1.2.1 installed the first four; Install.ps1 comes
 # along when the 1.2.1 updater installs a newer release in that layout. Only
-# these are removed when migrating.
-$script:LegacyFiles = @("$script:ModuleName.psd1", "$script:ModuleName.psm1", 'LICENSE', 'ReadMe.md', 'Install.ps1')
+# these are removed when migrating. Windows paths are case-insensitive, so
+# 'README.md' also matches the 'ReadMe.md' of older versions.
+$script:LegacyFiles = @("$script:ModuleName.psd1", "$script:ModuleName.psm1", 'LICENSE', 'README.md', 'Install.ps1')
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -39,6 +40,10 @@ $script:LegacyFiles = @("$script:ModuleName.psd1", "$script:ModuleName.psm1", 'L
 
 function Get-LogBasePath {
     # Separate function so tests can mock the base path.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
     $documents = [Environment]::GetFolderPath('MyDocuments')
     if ([string]::IsNullOrWhiteSpace($documents)) {
         # Some service accounts have no Documents folder.
@@ -48,33 +53,63 @@ function Get-LogBasePath {
 }
 
 function Get-LogTimestamp {
-    param([string]$Format = $script:TimestampFormat)
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$Format = $script:TimestampFormat
+    )
+
+
     # InvariantCulture: ':' in a .NET format string is the culture's time separator.
     (Get-Date).ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Get-DefaultLogFileName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
     '{0}_{1}.log' -f $env:COMPUTERNAME, (Get-LogTimestamp -Format 'yyyy-MM-dd_HH-mm-ss')
 }
 
 function Write-LogFallback {
     # Last-resort console output. Must never throw, even if the caller set
     # $WarningPreference = 'Stop'.
-    param([string]$Text)
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
     try {
         Write-Warning -Message "DonGrobione.Logging: $Text"
     }
     catch {
-        # Nothing left to fall back to.
+        # Nothing left to fall back to; discard the error on purpose.
+        $null = $_
     }
 }
 
 function Invoke-WithRetry {
     # Runs $Action up to $RetryCount times with a linearly increasing delay
     # (RetryDelayMs, 2x, 3x, ...). Returns an object with Success and Error.
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
         [scriptblock]$Action,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 100)]
         [int]$RetryCount,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 60000)]
         [int]$RetryDelayMs
     )
 
@@ -97,7 +132,13 @@ function Invoke-WithRetry {
 
 function Confirm-LogDirectory {
     # Ensures the log directory exists (with retry). Returns the retry result.
-    param([pscustomobject]$Config)
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [pscustomobject]$Config
+    )
 
     if ([System.IO.Directory]::Exists($Config.Directory)) {
         return [pscustomobject]@{ Success = $true; Error = $null }
@@ -111,8 +152,14 @@ function Confirm-LogDirectory {
 function Invoke-LogRetention {
     # Deletes the oldest log files of the CURRENT host so that, together with
     # the session's own log file, at most RetentionCount remain. Files that
-    # cannot be deleted (e.g. locked by the sync client) are skipped.
-    param([pscustomobject]$Config)
+    # cannot be deleted (e.g. locked by the sync client) are skipped. Honors
+    # -WhatIf/-Confirm, also when inherited from Start-Log.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [pscustomobject]$Config
+    )
 
     if (-not [System.IO.Directory]::Exists($Config.Directory)) {
         return
@@ -135,6 +182,9 @@ function Invoke-LogRetention {
     }
 
     foreach ($file in $candidates[$keep..($candidates.Count - 1)]) {
+        if (-not $PSCmdlet.ShouldProcess($file.FullName, 'Delete old log file')) {
+            continue
+        }
         try {
             [System.IO.File]::Delete($file.FullName)
             Write-Verbose -Message "Retention: deleted '$($file.FullName)'."
@@ -150,11 +200,29 @@ function Initialize-LogSession {
     # retention. Shared by Start-Log and the Write-Log default fallback.
     [CmdletBinding()]
     param(
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
         [string]$LogDirectory = 'Default',
+
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$LogFileName,
+
+        [Parameter()]
+        [ValidateRange(1, 10000)]
         [int]$RetentionCount = 5,
+
+        [Parameter()]
+        [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL')]
         [string]$MinimumLevel = 'INFO',
+
+        [Parameter()]
+        [ValidateRange(1, 100)]
         [int]$RetryCount = 3,
+
+        [Parameter()]
+        [ValidateRange(0, 60000)]
         [int]$RetryDelayMs = 500
     )
 
@@ -192,9 +260,20 @@ function Initialize-LogSession {
 function Format-LogEntry {
     # Returns the complete entry (all lines, trailing newline) as one string so
     # it can be appended in a single write.
+    [CmdletBinding()]
+    [OutputType([string])]
     param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$Message,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL')]
         [string]$Level,
+
+        [Parameter()]
+        [AllowNull()]
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
 
@@ -230,7 +309,13 @@ function Get-ModuleInstallPath {
     # Module base folder of the running edition, <Modules>\DonGrobione.Logging,
     # which holds one subfolder per installed version. Separate function so
     # tests can mock the install location.
-    param([string]$Scope)
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('CurrentUser', 'AllUsers')]
+        [string]$Scope
+    )
 
     $editionFolder = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'WindowsPowerShell' }
     $root = if ($Scope -eq 'AllUsers') { $env:ProgramFiles } else { [Environment]::GetFolderPath('MyDocuments') }
@@ -243,7 +328,13 @@ function Get-InstalledModuleVersion {
     # (manifest directly in <base>) that versions up to 1.2.1 installed.
     # PowerShell ignores a version folder whose manifest version differs from
     # the folder name, so such a folder is skipped here too.
-    param([string]$ModuleRoot)
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ModuleRoot
+    )
 
     if (-not [System.IO.Directory]::Exists($ModuleRoot)) {
         return
@@ -291,7 +382,13 @@ function Get-InstalledModuleVersion {
 function ConvertFrom-ManifestText {
     # Parses manifest text the way Import-PowerShellDataFile does (constant
     # values only), so a manifest inside a zip can be checked in memory.
-    param([string]$Text)
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
 
     $tokens      = $null
     $parseErrors = $null
@@ -310,8 +407,14 @@ function Confirm-ModuleVersionFolder {
     # Throws unless <Path> is a working copy of version <ExpectedVersion>: the
     # folder name, the manifest's ModuleVersion and the imported module's
     # version must all match, and Import-Module must succeed.
+    [CmdletBinding()]
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
         [version]$ExpectedVersion
     )
 
@@ -358,10 +461,21 @@ function Install-ModulePackage {
     # one top-level folder named like the module (built by release.yml). The
     # version folder must not exist yet. If anything fails after it was
     # created, it is removed again; other version folders are never touched.
-    # Returns the path of the new version folder.
+    # Returns the path of the new version folder. The caller asks
+    # ShouldProcess before calling it.
+    [CmdletBinding()]
+    [OutputType([string])]
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$ZipPath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$ModuleRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
         [version]$ExpectedVersion
     )
 
@@ -442,7 +556,13 @@ function Get-LockedFile {
     # Returns the first file below the given files or folders that another
     # process has open, or $null. A loaded script module holds no handle on
     # its .psm1, but a loaded DLL, an editor or the sync client does.
-    param([string[]]$Path)
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Path
+    )
 
     foreach ($item in $Path) {
         foreach ($file in @(Get-ChildItem -LiteralPath $item -Recurse -File -Force -ErrorAction SilentlyContinue)) {
@@ -463,7 +583,20 @@ function Remove-InstalledModuleVersion {
     # only the module files of the legacy flat layout (never the base folder,
     # which holds the version folders). Returns $true on success. If a file is
     # in use nothing is removed; the next Update-DonGrobioneLogging retries.
-    param([pscustomobject]$Installed)
+    # Returns $false if ShouldProcess declines; -WhatIf/-Confirm are inherited
+    # from Update-DonGrobioneLogging.
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [pscustomobject]$Installed
+    )
+
+    $what = if ($Installed.IsLegacy) { "Remove version $($Installed.Version) (legacy layout without a version folder)" } else { "Remove version $($Installed.Version)" }
+    if (-not $PSCmdlet.ShouldProcess($Installed.Path, $what)) {
+        return $false
+    }
 
     if ($Installed.IsLegacy) {
         $targets = @($script:LegacyFiles | ForEach-Object { Join-Path $Installed.Path $_ } | Where-Object { Test-Path -LiteralPath $_ })
@@ -514,6 +647,11 @@ function Start-Log {
         Start-Log never throws. If the given configuration cannot be applied, a
         warning is written and the default configuration is used instead.
 
+        Supports -WhatIf and -Confirm. With -WhatIf, nothing changes: no
+        session is started, no directory is created and no old log file is
+        deleted. With -Confirm, each old log file is confirmed before it is
+        deleted.
+
     .PARAMETER LogDirectory
         Project/application subfolder under <MyDocuments>\Logs. Default: 'Default'.
 
@@ -544,34 +682,67 @@ function Start-Log {
     .EXAMPLE
         Start-Log -LogDirectory 'Backup' -MinimumLevel DEBUG -RetentionCount 10
 
+    .EXAMPLE
+        Start-Log -LogDirectory 'Backup' -RetentionCount 2 -WhatIf
+
+        Shows which log session would be started, without changing anything.
+
     .LINK
         Write-Log
 
     .LINK
         Stop-Log
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
+        [Parameter()]
         [ValidateNotNullOrEmpty()]
         [string]$LogDirectory = 'Default',
 
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$LogFileName,
 
+        [Parameter()]
         [ValidateRange(1, 10000)]
         [int]$RetentionCount = 5,
 
+        [Parameter()]
         [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL')]
         [string]$MinimumLevel = 'INFO',
 
+        [Parameter()]
         [ValidateRange(1, 100)]
         [int]$RetryCount = 3,
 
+        [Parameter()]
         [ValidateRange(0, 60000)]
         [int]$RetryDelayMs = 500
     )
 
     try {
-        Initialize-LogSession @PSBoundParameters
+        if (-not $PSCmdlet.ShouldProcess("LogDirectory '$LogDirectory'", 'Start logging session')) {
+            return
+        }
+    }
+    catch {
+        # ShouldProcess throws if the user halts at a -Confirm prompt; that
+        # must not start the default configuration either.
+        Write-LogFallback "Start-Log failed: $($_.Exception.Message)"
+        return
+    }
+
+    try {
+        $settings = @{
+            LogDirectory   = $LogDirectory
+            LogFileName    = $LogFileName
+            RetentionCount = $RetentionCount
+            MinimumLevel   = $MinimumLevel
+            RetryCount     = $RetryCount
+            RetryDelayMs   = $RetryDelayMs
+        }
+        Initialize-LogSession @settings
     }
     catch {
         Write-LogFallback "Start-Log failed ($($_.Exception.Message)). Falling back to the default configuration."
@@ -635,9 +806,12 @@ function Write-Log {
         [AllowEmptyString()]
         [string]$Message,
 
+        [Parameter()]
         [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL')]
         [string]$Level = 'INFO',
 
+        [Parameter()]
+        [AllowNull()]
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
 
@@ -687,6 +861,7 @@ function Stop-Log {
         configuration again.
 
         Call it in the finally block of the calling script. Never throws.
+        Supports -WhatIf and -Confirm; with -WhatIf the session keeps running.
 
     .EXAMPLE
         try { ... } finally { Stop-Log }
@@ -694,10 +869,18 @@ function Stop-Log {
     .LINK
         Start-Log
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param()
 
-    $script:LogConfig = $null
+    try {
+        if ($PSCmdlet.ShouldProcess('logging session', 'Stop')) {
+            $script:LogConfig = $null
+        }
+    }
+    catch {
+        # ShouldProcess throws if the user halts at a -Confirm prompt.
+        Write-LogFallback "Stop-Log failed: $($_.Exception.Message)"
+    }
 }
 
 function Test-LogSession {
@@ -842,7 +1025,9 @@ function Update-DonGrobioneLogging {
         Updates the copy for all users (run as administrator).
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    [OutputType([pscustomobject])]
     param(
+        [Parameter()]
         [ValidateSet('CurrentUser', 'AllUsers')]
         [string]$Scope = 'CurrentUser'
     )
@@ -944,8 +1129,7 @@ function Update-DonGrobioneLogging {
             }
         }
         foreach ($old in $obsolete) {
-            $what = if ($old.IsLegacy) { "Remove version $($old.Version) (legacy layout without a version folder)" } else { "Remove version $($old.Version)" }
-            if (-not $PSCmdlet.ShouldProcess($old.Path, $what) -or -not (Remove-InstalledModuleVersion -Installed $old)) {
+            if (-not (Remove-InstalledModuleVersion -Installed $old)) {
                 $allRemoved = $false
             }
         }

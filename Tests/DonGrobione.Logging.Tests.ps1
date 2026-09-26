@@ -2,7 +2,12 @@
 # Run all:          Invoke-Pester -Script .\Tests
 # Run one Describe: Invoke-Pester -Script .\Tests -TestName 'Retention'
 
-$moduleManifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'DonGrobione.Logging.psd1'
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helpers only write to TestDrive.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Variables set in BeforeEach are used in the It blocks.')]
+param()
+
+$projectRoot    = Split-Path -Parent $PSScriptRoot
+$moduleManifest = Join-Path $projectRoot 'DonGrobione.Logging.psd1'
 Get-Module -Name DonGrobione.Logging | Remove-Module -Force
 Import-Module $moduleManifest -Force -ErrorAction Stop
 
@@ -13,7 +18,7 @@ function New-TestDirectoryName {
     'T' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 }
 
-function Get-LogLines {
+function Get-LogLine {
     param([string]$Path)
     # Leading comma: keep a one-line file as an array instead of unrolling it to a string.
     , @(Get-Content -LiteralPath $Path -Encoding UTF8)
@@ -34,14 +39,14 @@ Describe 'Formatting' {
 
     It 'writes a single-line message as exactly one line' {
         Write-Log 'Hello'
-        $lines = Get-LogLines $logFile
+        $lines = Get-LogLine $logFile
         $lines.Count | Should Be 1
         $lines[0] | Should Match ($timestampPattern + '\[INFO\] Hello$')
     }
 
     It 'writes a message with N line breaks as N+1 lines with continuation prefix' {
         Write-Log -Level ERROR -Message "first`r`nsecond`nthird`rfourth"
-        $lines = Get-LogLines $logFile
+        $lines = Get-LogLine $logFile
         $lines.Count | Should Be 4
         $lines[0] | Should Match ($timestampPattern + '\[ERROR\] first$')
         $lines[1] | Should BeExactly '    -> second'
@@ -54,7 +59,7 @@ Describe 'Formatting' {
         try { Invoke-Failure } catch { $errorRecord = $_ }
 
         Write-Log -Level ERROR -Message 'Sync-ADUsers failed' -ErrorRecord $errorRecord
-        $lines = Get-LogLines $logFile
+        $lines = Get-LogLine $logFile
 
         $lines[0] | Should Match ($timestampPattern + '\[ERROR\] Sync-ADUsers failed$')
         $lines[1] | Should BeExactly '    -> Exception: Connection to domain controller unavailable'
@@ -69,14 +74,14 @@ Describe 'Formatting' {
         Write-Log -Level DEBUG -Message 'debug'
         Write-Log -Level INFO -Message 'info'
         Write-Log -Level WARN -Message 'warn'
-        $lines = Get-LogLines $logFile
+        $lines = Get-LogLine $logFile
         $lines.Count | Should Be 1
         $lines[0] | Should Match '\[WARN\] warn$'
     }
 
     It 'accepts an empty message' {
         { Write-Log '' } | Should Not Throw
-        (Get-LogLines $logFile)[0] | Should Match ($timestampPattern + '\[INFO\] $')
+        (Get-LogLine $logFile)[0] | Should Match ($timestampPattern + '\[INFO\] $')
     }
 }
 
@@ -89,7 +94,7 @@ Describe 'Timestamp' {
         Stop-Log
         Start-Log -LogDirectory 'Timestamp' -LogFileName 'test.log'
         Write-Log 'afternoon'
-        $lines = Get-LogLines (Join-Path $logRoot 'Timestamp\test.log')
+        $lines = Get-LogLine (Join-Path $logRoot 'Timestamp\test.log')
         $lines[0] | Should BeExactly '2026-09-17 14:50:58 [INFO] afternoon'
     }
 }
@@ -105,7 +110,7 @@ Describe 'Default configuration' {
         $files = @(Get-ChildItem -LiteralPath (Join-Path $logRoot 'Default') -Filter '*.log')
         $files.Count | Should Be 1
         $files[0].Name | Should Match ('^{0}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}-\d{{2}}\.log$' -f [regex]::Escape($env:COMPUTERNAME))
-        (Get-LogLines $files[0].FullName)[0] | Should Match '\[INFO\] uninitialized$'
+        (Get-LogLine $files[0].FullName)[0] | Should Match '\[INFO\] uninitialized$'
     }
 }
 
@@ -183,6 +188,13 @@ Describe 'Safety' {
             Set-Acl -LiteralPath $dir -AclObject $acl
         }
     }
+
+    It 'does not throw when the caller sets WarningPreference to Stop' {
+        InModuleScope DonGrobione.Logging {
+            $WarningPreference = 'Stop'
+            { Write-LogFallback 'console only' } | Should Not Throw
+        }
+    }
 }
 
 Describe 'Retry' {
@@ -225,7 +237,7 @@ Describe 'Retry' {
 
         $warnings.Count | Should Be 0
         $stopwatch.ElapsedMilliseconds | Should BeGreaterThan 300
-        $lines = Get-LogLines $logFile
+        $lines = Get-LogLine $logFile
         $lines.Count | Should Be 2
         $lines[1] | Should Match '\[INFO\] after lock$'
     }
@@ -333,7 +345,106 @@ Describe 'Session' {
         (Get-LogSession).MinimumLevel | Should Be 'INFO'
     }
 }
+Describe 'ShouldProcess' {
+    $logRoot = Join-Path $TestDrive 'Logs'
+    Mock -ModuleName DonGrobione.Logging Get-LogBasePath { [System.IO.Path]::Combine($TestDrive, 'Logs') }
 
+    # Four old log files of this host, oldest first.
+    function New-OldLogFile {
+        param([string]$Directory)
+        $null = New-Item -ItemType Directory -Path $Directory -Force
+        for ($i = 1; $i -le 4; $i++) {
+            $path = Join-Path $Directory ('{0}_2026-01-0{1}_12-00-00.log' -f $env:COMPUTERNAME, $i)
+            Set-Content -LiteralPath $path -Value 'old'
+            (Get-Item -LiteralPath $path).LastWriteTime = (Get-Date).AddDays(-10 + $i)
+        }
+    }
+
+    BeforeEach {
+        Stop-Log
+    }
+
+    It 'Start-Log -WhatIf starts no session, creates no directory and deletes no file' {
+        $dir = Join-Path $logRoot 'WhatIfStart'
+        New-OldLogFile $dir
+        Start-Log -LogDirectory 'WhatIfStart' -RetentionCount 1 -WhatIf
+        Test-LogSession | Should Be $false
+        @(Get-ChildItem -LiteralPath $dir).Count | Should Be 4
+
+        Start-Log -LogDirectory 'WhatIfNew' -WhatIf
+        Join-Path $logRoot 'WhatIfNew' | Should Not Exist
+    }
+
+    It 'Start-Log -Confirm:$false starts the session and applies retention' {
+        $dir = Join-Path $logRoot 'ConfirmFalse'
+        New-OldLogFile $dir
+        Start-Log -LogDirectory 'ConfirmFalse' -RetentionCount 2 -Confirm:$false
+        Test-LogSession | Should Be $true
+        @(Get-ChildItem -LiteralPath $dir).Count | Should Be 1
+    }
+
+    It 'retention deletes nothing with -WhatIf' {
+        $dir = Join-Path $logRoot 'WhatIfRetention'
+        New-OldLogFile $dir
+        InModuleScope DonGrobione.Logging {
+            $config = [pscustomobject]@{
+                Directory      = [System.IO.Path]::Combine($TestDrive, 'Logs', 'WhatIfRetention')
+                FilePath       = [System.IO.Path]::Combine($TestDrive, 'Logs', 'WhatIfRetention', 'current.log')
+                RetentionCount = 1
+            }
+            Invoke-LogRetention -Config $config -WhatIf
+        }
+        @(Get-ChildItem -LiteralPath $dir).Count | Should Be 4
+    }
+
+    It 'Stop-Log -WhatIf keeps the session running' {
+        Start-Log -LogDirectory (New-TestDirectoryName)
+        Stop-Log -WhatIf
+        Test-LogSession | Should Be $true
+        Stop-Log
+        Test-LogSession | Should Be $false
+    }
+}
+
+Describe 'Manifest' {
+    $manifest = Import-PowerShellDataFile -LiteralPath $moduleManifest
+    $psData   = $manifest.PrivateData.PSData
+
+    It 'names the author and requires Windows PowerShell 5.1' {
+        $manifest.Author | Should BeExactly 'DonGrobione'
+        $manifest.PowerShellVersion | Should Be '5.1'
+    }
+
+    It 'uses a SemVer ModuleVersion' {
+        $manifest.ModuleVersion | Should Match '^\d+\.\d+\.\d+$'
+    }
+
+    It 'lists exactly the exported functions, without wildcards' {
+        $listed   = @($manifest.FunctionsToExport)
+        $exported = @((Get-Module -Name DonGrobione.Logging).ExportedFunctions.Keys)
+        ($listed | Where-Object { $_ -match '\*' }).Count | Should Be 0
+        (@($listed | Sort-Object) -join ',') | Should Be (@($exported | Sort-Object) -join ',')
+    }
+
+    It 'has the Gallery metadata' {
+        @($psData.Tags).Count | Should BeGreaterThan 0
+        $psData.ProjectUri | Should Be 'https://github.com/DonGrobione/Logging'
+        $psData.LicenseUri | Should Be 'https://github.com/DonGrobione/Logging/blob/main/LICENSE'
+        $psData.ReleaseNotes | Should Match ([regex]::Escape($manifest.ModuleVersion))
+    }
+
+    It 'has README.md, LICENSE and CHANGELOG.md in the project root' {
+        $names = @(Get-ChildItem -LiteralPath $projectRoot -File | ForEach-Object { $_.Name })
+        foreach ($name in 'README.md', 'LICENSE', 'CHANGELOG.md') {
+            $names -ccontains $name | Should Be $true
+        }
+    }
+
+    It 'has a CHANGELOG entry for the ModuleVersion' {
+        $changelog = Get-Content -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Raw
+        $changelog | Should Match ('(?m)^## \[{0}\] - \d{{4}}-\d{{2}}-\d{{2}}\r?$' -f [regex]::Escape($manifest.ModuleVersion))
+    }
+}
 
 Describe 'Update' {
     # Fake release v9.9.9: the API call returns a release object, the download
@@ -459,6 +570,15 @@ Describe 'Update' {
         $result.Updated | Should Be $false
         $newPath | Should Not Exist
         Get-FolderVersion $oldPath | Should Be ([version]'1.0.0')
+    }
+
+    It 'does not remove older versions with -WhatIf' {
+        $null = Set-InstalledVersion '9.9.9'
+        $null = Set-InstalledVersion '1.0.0' -Legacy
+        $result = Update-DonGrobioneLogging -WhatIf
+        $result.Updated | Should Be $false
+        Join-Path $moduleRoot 'DonGrobione.Logging.psd1' | Should Exist
+        Join-Path $moduleRoot 'ReadMe.md' | Should Exist
     }
 
     It 'refuses to change a git clone' {

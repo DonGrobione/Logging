@@ -33,8 +33,16 @@
 
 .PARAMETER Scope
     CurrentUser (default) or AllUsers. AllUsers requires an elevated session.
+
+.EXAMPLE
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/DonGrobione/Logging/main/Install.ps1))) -WhatIf
+
+    Shows where the latest release would be installed, without installing it.
+    -WhatIf and -Confirm only work this way, not with 'irm | iex'.
 #>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
+    [Parameter()]
     [ValidateSet('CurrentUser', 'AllUsers')]
     [string]$Scope = 'CurrentUser'
 )
@@ -43,18 +51,26 @@ param(
 # here would otherwise leak into the caller's session, including
 # $ErrorActionPreference. The helpers below mirror the private functions of
 # the same name in DonGrobione.Logging.psm1; keep them in sync.
+# $Cmdlet is $null under 'irm | iex', which ignores [CmdletBinding()].
 & {
-    param([string]$Scope)
+    param([string]$Scope, [System.Management.Automation.PSCmdlet]$Cmdlet)
 
     $ErrorActionPreference = 'Stop'
     $moduleName  = 'DonGrobione.Logging'
     $apiUrl      = 'https://api.github.com/repos/DonGrobione/Logging/releases/latest'
     $headers     = @{ 'User-Agent' = $moduleName; 'Accept' = 'application/vnd.github+json' }
-    $legacyFiles = @("$moduleName.psd1", "$moduleName.psm1", 'LICENSE', 'ReadMe.md', 'Install.ps1')
+    $legacyFiles = @("$moduleName.psd1", "$moduleName.psm1", 'LICENSE', 'README.md', 'Install.ps1')
     $zipPath     = Join-Path ([System.IO.Path]::GetTempPath()) ('{0}-{1}.zip' -f $moduleName, [guid]::NewGuid().ToString('N'))
 
     function ConvertFrom-ManifestText {
-        param([string]$Text)
+        [CmdletBinding()]
+        [OutputType([hashtable])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyString()]
+            [string]$Text
+        )
+
         $tokens      = $null
         $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$parseErrors)
@@ -69,7 +85,16 @@ param(
     }
 
     function Confirm-ModuleVersionFolder {
-        param([string]$Path, [version]$ExpectedVersion)
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateNotNullOrEmpty()]
+            [string]$Path,
+
+            [Parameter(Mandatory = $true)]
+            [ValidateNotNull()]
+            [version]$ExpectedVersion
+        )
 
         $folderName = Split-Path -Path $Path -Leaf
         if ($folderName -ne $ExpectedVersion.ToString()) {
@@ -108,7 +133,21 @@ param(
     }
 
     function Install-ModulePackage {
-        param([string]$ZipPath, [string]$ModuleRoot, [version]$ExpectedVersion)
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateNotNullOrEmpty()]
+            [string]$ZipPath,
+
+            [Parameter(Mandatory = $true)]
+            [ValidateNotNullOrEmpty()]
+            [string]$ModuleRoot,
+
+            [Parameter(Mandatory = $true)]
+            [ValidateNotNull()]
+            [version]$ExpectedVersion
+        )
 
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         $prefix     = "$moduleName/"
@@ -194,7 +233,7 @@ param(
         # Windows PowerShell 5.1 does not enable TLS 1.2 by default; GitHub requires it.
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-        Write-Host "Checking latest release of $moduleName ..."
+        Write-Information -MessageData "Checking latest release of $moduleName ..." -InformationAction Continue
         $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -UseBasicParsing
 
         $latestVersion = $null
@@ -213,10 +252,14 @@ param(
                 "(Remove-Item -LiteralPath '$targetPath' -Recurse) and run the installer again.")
         }
 
-        Write-Host "Downloading $($asset.name) ..."
+        if ($null -ne $Cmdlet -and -not $Cmdlet.ShouldProcess($targetPath, "Install version $latestVersion")) {
+            return
+        }
+
+        Write-Information -MessageData "Downloading $($asset.name) ..." -InformationAction Continue
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ 'User-Agent' = $moduleName } -UseBasicParsing
         $null = Install-ModulePackage -ZipPath $zipPath -ModuleRoot $moduleRoot -ExpectedVersion $latestVersion
-        Write-Host "Installed $moduleName $latestVersion to '$targetPath'."
+        Write-Information -MessageData "Installed $moduleName $latestVersion to '$targetPath'." -InformationAction Continue
 
         # PowerShell prefers version folders, so an installation without one
         # (versions up to 1.2.1) is no longer loaded but still listed.
@@ -228,10 +271,10 @@ param(
         }
 
         if (Get-Module -Name $moduleName) {
-            Write-Host "The module is loaded in this session. Run 'Import-Module $moduleName -Force' to load the new version."
+            Write-Information -MessageData "The module is loaded in this session. Run 'Import-Module $moduleName -Force' to load the new version." -InformationAction Continue
         }
         else {
-            Write-Host "Use it with: Import-Module $moduleName"
+            Write-Information -MessageData "Use it with: Import-Module $moduleName" -InformationAction Continue
         }
     }
     catch {
@@ -240,4 +283,4 @@ param(
     finally {
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     }
-} -Scope $Scope
+} -Scope $Scope -Cmdlet $PSCmdlet

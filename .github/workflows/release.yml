@@ -44,7 +44,7 @@ jobs:
           # Top-level folder named like the module, so the zip can be extracted
           # straight into a PowerShell module path.
           mkdir -p staging/DonGrobione.Logging
-          cp DonGrobione.Logging.psd1 DonGrobione.Logging.psm1 Install.ps1 LICENSE ReadMe.md staging/DonGrobione.Logging/
+          cp DonGrobione.Logging.psd1 DonGrobione.Logging.psm1 Install.ps1 LICENSE README.md staging/DonGrobione.Logging/
           zip_name="DonGrobione.Logging-${{ steps.version.outputs.version }}.zip"
           (cd staging && zip -r "../$zip_name" DonGrobione.Logging)
           unzip -l "$zip_name"
